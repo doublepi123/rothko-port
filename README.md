@@ -19,6 +19,7 @@ LineageOS 官方设备或可直接刷入的发行版。
 | [docs/VALIDATION.md](docs/VALIDATION.md) | 真机证据、用户验收和验证限制 |
 | [PORTING-NOTES.md](PORTING-NOTES.md) | 指纹、振动、硬件热词的原因与方案 |
 | [docs/OFFICIAL-READINESS.md](docs/OFFICIAL-READINESS.md) | 申请官方支持前仍需解决的事项 |
+| [docs/CI.md](docs/CI.md) | 每日源码检查、接入验证和固定基线补丁矩阵 |
 | [NOTICE](NOTICE) | 许可、署名和专有输入边界 |
 
 ## 单仓库布局
@@ -63,4 +64,4 @@ Hey Google。详细证据级别见 [验证记录](docs/VALIDATION.md)。
 发布证据的整机目标。不要把模块编译或补丁应用成功当作整机可复现。
 
 本仓库不包含固件、Google APK、私钥或可刷 nightly。
-目前没有启用每日 ROM 构建/自动发布工作流。
+已配置每日轻量 [源码 CI](docs/CI.md)，不包含 ROM 编译或自动发布。

@@ -1,0 +1,60 @@
+name: Source checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 19 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Source and installer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up pinned Python script runner
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.8"
+          enable-cache: false
+      - name: Check tracked source
+        run: uv run --no-project tools/check-source.py
+      - name: Exercise installer
+        run: bash tools/check-install.sh
+      - name: Define patch matrix
+        id: matrix
+        run: echo "value=$(uv run --no-project tools/check-source.py --matrix)" >> "$GITHUB_OUTPUT"
+
+  patches:
+    name: Patches (${{ matrix.project }})
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.validate.outputs.matrix) }}
+    steps:
+      - name: Check out patch series
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch pinned upstream and apply patches
+        env:
+          PATCH_SERIES: ${{ matrix.project }}
+        run: bash tools/check-patch.sh "$PATCH_SERIES"
