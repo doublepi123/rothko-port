@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SPDX-License-Identifier: Apache-2.0
+
+    Panel pixel pitch in micrometers (1220x2712 at 445.614 dpi: 25400 / 445.614).
+    UdfpsOverlayInteractor sizes the UDFPS lock icon from udfps_icon_size / pixel_pitch.
+-->
+<resources>
+    <item name="pixel_pitch" format="float" type="dimen">57.0</item>
+</resources>
