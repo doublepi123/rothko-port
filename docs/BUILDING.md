@@ -1,19 +1,23 @@
 # 使用与构建边界
 
-## 离线取用
+## 获取与接入
 
-交付目录提供三个 `.bundle` 和 `SHA256SUMS`。先在交付目录执行：
+本仓库已经包含设备树和厂商输入脚本。先把它检出到 Android 源码树外：
 
 ```bash
-sha256sum -c SHA256SUMS
-git clone rothko-port.bundle rothko-port
-git clone android_device_xiaomi_rothko.bundle android_device_xiaomi_rothko
-git clone android_vendor_xiaomi_rothko.bundle android_vendor_xiaomi_rothko
+git clone https://github.com/doublepi123/rothko-port.git
+cd rothko-port
+bash tools/install-source.sh /absolute/path/to/android
 ```
 
-顶层仓库不把另外两个仓库作为 submodule。将设备树和厂商树复制到
-Android 源码树各自路径，保留其 `.git`。历史 mfp-daemon-rs 不需要
-复制到当前构建。
+接入目标必须包含 `build/envsetup.sh`。脚本先检查两个目标目录，
+不同内容、普通文件或符号链接目标均拒绝，不覆盖用户修改。
+相同目录再次调用不会改动；缺失的目录按本仓库内容复制。
+跨两个目录的安装不是磁盘故障下的原子事务，不要并发修改同一目标。
+厂商脚本仍依赖的外部输入布局并不会由这个接入步骤补齐。
+
+原仓库历史已经合并在本仓库，不需要分别 clone 或初始化子仓库。
+历史 mfp-daemon-rs 不需要复制到当前构建。
 
 ## 上游与补丁
 
@@ -25,7 +29,7 @@ Android 源码树各自路径，保留其 `.git`。历史 mfp-daemon-rs 不需�
 4. 设置自己的 Git committer 身份后执行：
 
 ```bash
-bash apply-patches.sh /absolute/path/to/android
+bash tools/apply-patches.sh /absolute/path/to/android
 ```
 
 入口会先检查全部八个仓库的基线、干净状态、committer 身份和补丁能否
@@ -33,9 +37,9 @@ bash apply-patches.sh /absolute/path/to/android
 拒绝；它不会自动 reset 或 stash 用户内容。应用中遭遇磁盘错误等情况
 并不构成跨仓库原子事务，需按输出定位 `git am` 状态后人工处理。
 
-`local_manifests/rothko.xml` 是**将来发布 forks 后使用的模板**，
-`YOUR-ACCOUNT` 尚未替换，当前不能直接拿去 repo sync。
-补丁路线和 fork 路线择一，不重复应用。
+原多仓库 `local_manifest` 模板已移到 `archive/multi-repo-manifest.xml`，
+因为这里没有发布八个独立 fork。当前流程是单仓库接入加补丁应用，
+不要把归档模板复制进 `.repo/local_manifests`。
 
 ## 当前可构建目标
 

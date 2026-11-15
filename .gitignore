@@ -1,4 +1,8 @@
-/android_device_xiaomi_rothko/
-/android_vendor_xiaomi_rothko/
-/mfp-daemon-rs/
 __pycache__/
+*.pyc
+*.bundle
+/out/
+/firmware/
+/logs/
+*.pem
+*.pk8

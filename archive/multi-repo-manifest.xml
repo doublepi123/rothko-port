@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Fork template only: replace YOUR-ACCOUNT after publishing the repositories. -->
+<!-- Archived multi-repository template. Not used by the current monorepo build.
+     Those independent forks have not been published. Do not repo sync this file. -->
 <manifest>
   <remote name="rothko" fetch="https://github.com/YOUR-ACCOUNT" revision="lineage-23.2" />
 

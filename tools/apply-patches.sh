@@ -7,7 +7,7 @@ if [[ $# != 1 || ! -d $1 ]]; then
     exit 2
 fi
 
-here=$(cd -- "$(dirname -- "$0")" && pwd)
+here=$(cd -- "$(dirname -- "$0")/.." && pwd)
 root=$(cd -- "$1" && pwd)
 run_tmp=$(mktemp -d "${TMPDIR:-/tmp}/rothko-patch-check.XXXXXX")
 trap 'rm -rf -- "$run_tmp"' EXIT

@@ -1,17 +1,17 @@
 # 内容清单
 
-## 当前独立仓库
+## 当前单仓库组成
 
 | 名称 | 用途 | 许可/来源 |
 | --- | --- | --- |
-| 顶层 `rothko-port`（暂定名） | 文档、活动补丁、清单模板、镜像工具 | 原创整理内容 Apache-2.0；补丁保留来源 |
-| `android_device_xiaomi_rothko` | 设备配置、RRO、IMS 引入、振动 alias、UDFPS handler | 依文件头与 LICENSE |
-| `android_vendor_xiaomi_rothko` | 固件输入清单、校验与整理脚本 | 依文件头与 LICENSE，不含专有镜像 |
+| `rothko-port` 顶层 | 文档、活动补丁、接入脚本、镜像工具 | 原创整理内容 Apache-2.0；补丁保留来源 |
+| `device/xiaomi/rothko` | 设备配置、RRO、IMS 引入、振动 alias、UDFPS handler | 依文件头与 LICENSE |
+| `vendor/xiaomi/rothko` | 固件输入清单、校验与整理脚本 | 依文件头与 LICENSE，不含专有镜像 |
 
-`mfp-daemon-rs` 留在本机供追溯，上游为
+旧 `mfp-daemon-rs` 不纳入当前源码树，上游为
 [hoshikv/mfp-daemon-rs](https://github.com/hoshikv/mfp-daemon-rs)，基于
 `2f42d751554db496b055ebb64e3e425acffccf04`。它保留自己的 LICENSE、
-NOTICE 和历史，不是当前运行方案，也不纳入当前离线交付的必需仓库。
+NOTICE 和历史保留在原本地工作区，不是当前运行方案或构建依赖。
 
 ## 活动补丁
 
@@ -28,13 +28,14 @@ NOTICE 和历史，不是当前运行方案，也不纳入当前离线交付的�
 | external/perfetto | 1 | 唤醒锁追踪不阻塞 |
 | hardware/xiaomi | 2 | 无变体后缀的旧 HAL 加载；预编译 vendor 的静态 handler/配置桥接 |
 
-共 8 个项目、12 个补丁。`apply-patches.sh` 只读取这个活动索引。
+共 8 个项目、12 个补丁。`tools/apply-patches.sh` 只读取这个活动索引。
 上游已合并与否、是否适合官方准入需要分别评审，不能据此视为获上游认可。
 
 ## 已归档内容
 
 [archive/legacy-fod](archive/legacy-fod/README.md) 保存完整旧
-frameworks/base FOD 补丁。不重写原分支，不删除原源码工作区，
+frameworks/base FOD 补丁。`archive/multi-repo-manifest.xml` 是旧多仓库
+发布方案的清单模板，不用于当前构建。不重写原分支，不删除原源码工作区，
 不自动应用归档补丁。`build/soong` 和 `build/blueprint` 的本机构建
 调优也不在活动索引中。
 
