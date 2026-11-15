@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- STAGED ADDITIVE REVIEW ONLY. Do not apply over the production owner's tree blindly.
+     The original five entries remain unchanged. Seven new exact profiles require
+     device=rothko and map the demonstrated final packaged OEM include result:
+     vendor_miui -> vendor_device default_v2.9.5 include -> vendor_device body.
+     This is NOT a current SIM/operator assertion, NR-property substitute, global
+     override, provisioning change, or new provider behavior. See HANDOFF.md. -->
+<carrier_config_list>
+    <carrier_config mcc="460" mnc="00">
+        <boolean name="carrier_volte_available_bool" value="true" />
+    </carrier_config>
+    <carrier_config mcc="460" mnc="02">
+        <boolean name="carrier_volte_available_bool" value="true" />
+    </carrier_config>
+    <carrier_config mcc="460" mnc="04">
+        <boolean name="carrier_volte_available_bool" value="true" />
+    </carrier_config>
+    <carrier_config mcc="460" mnc="07">
+        <boolean name="carrier_volte_available_bool" value="true" />
+    </carrier_config>
+    <carrier_config mcc="460" mnc="08">
+        <boolean name="carrier_volte_available_bool" value="true" />
+    </carrier_config>
+    <carrier_config mcc="460" mnc="01" device="rothko">
+        <boolean name="carrier_volte_available_bool" value="true" />
+    </carrier_config>
+    <carrier_config mcc="460" mnc="03" device="rothko">
+        <boolean name="carrier_volte_available_bool" value="true" />
+    </carrier_config>
+    <carrier_config mcc="460" mnc="05" device="rothko">
+        <boolean name="carrier_volte_available_bool" value="true" />
+    </carrier_config>
+    <carrier_config mcc="460" mnc="06" device="rothko">
+        <boolean name="carrier_volte_available_bool" value="true" />
+    </carrier_config>
+    <carrier_config mcc="460" mnc="09" device="rothko">
+        <boolean name="carrier_volte_available_bool" value="true" />
+    </carrier_config>
+    <carrier_config mcc="460" mnc="11" device="rothko">
+        <boolean name="carrier_volte_available_bool" value="true" />
+    </carrier_config>
+    <carrier_config mcc="460" mnc="12" device="rothko">
+        <boolean name="carrier_volte_available_bool" value="true" />
+    </carrier_config>
+</carrier_config_list>

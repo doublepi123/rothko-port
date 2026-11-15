@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.rothko.overlay.statusbar.systemui"
+    android:versionCode="1" android:versionName="1">
+    <uses-sdk android:minSdkVersion="36" android:targetSdkVersion="36" />
+    <application android:hasCode="false" />
+    <overlay android:targetPackage="com.android.systemui"
+        android:isStatic="true" android:priority="601" />
+</manifest>

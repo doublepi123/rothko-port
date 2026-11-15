@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: Apache-2.0
+// Exact same-firmware IMS payload, current development platform signature.
+// Import normalizes JNI/dex via ordinary Soong rules; no validation skips.
+android_app_import {
+    name: "RothkoImsService",
+    apk: "prebuilt/ImsService.apk",
+    certificate: "platform",
+    privileged: true,
+    system_ext_specific: true,
+    compile_multilib: "64",
+    optional_uses_libs: [
+        "com.mediatek.ims.oemplugin",
+        "com.mediatek.ims.plugin",
+    ],
+    enforce_uses_libs: true,
+    required: ["rothko_ims_privapp_permissions"],
+}
+
+prebuilt_etc {
+    name: "rothko_ims_privapp_permissions",
+    src: "permissions/privapp-permissions-rothko-ims.xml",
+    filename: "privapp-permissions-rothko-ims.xml",
+    sub_dir: "permissions",
+    system_ext_specific: true,
+}
+
+runtime_resource_overlay {
+    name: "RothkoImsTelephonyOverlay",
+    manifest: "TelephonyOverlay/AndroidManifest.xml",
+    resource_dirs: ["TelephonyOverlay/res"],
+    certificate: "platform",
+    system_ext_specific: true,
+}
+
+runtime_resource_overlay {
+    name: "RothkoImsFrameworkOverlay",
+    manifest: "FrameworkOverlay/AndroidManifest.xml",
+    resource_dirs: ["FrameworkOverlay/res"],
+    certificate: "platform",
+    system_ext_specific: true,
+}

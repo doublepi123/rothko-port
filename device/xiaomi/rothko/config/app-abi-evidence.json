@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "decision": "64_bit_apps_only_native_32_bit_dependency_support_is_separate",
+  "supersedes": "Initial supports_32_bit_apps=true inferred from generic ramdisk properties; that inference was not device-specific evidence.",
+  "sources": {
+    "firmware/dump/vendor/build.prop": "32cae95c58d07fe815f20c16ee98056e0a9b57f3db5de578b01158a7a3894bd7",
+    "firmware/dump/odm/etc/build.prop": "2e61e9235b18b67edb420554e35484d83b8755617a04896c5df52f39cef155b8",
+    "firmware/dump/vendor/bin/hw/android.hardware.media.c2@1.2-mediatek": "4b0a32a196cc935f8f0752edb1fec0f99387282f0ca82d57fee1b5b9f8cd80bc",
+    "firmware/dump/vendor/bin/hw/android.hardware.media.c2@1.2-mediatek-64b": "46aeada816718c4963b642934fa0adcab5608772667fb26efe8ba97373324a2a",
+    "firmware/dump/vendor/etc/init/android.hardware.media.c2@1.2-mediatek-64b.rc": "ffef084385477e8fade3a5a740f49abb5b7d47cddf01286623d4f8a32f657826"
+  },
+  "vendor_device_specific_abi_lines": [203, 204, 205],
+  "odm_device_specific_abi_lines": [56, 57, 58, 311, 312, 313],
+  "vendor_zygote": "zygote64_32",
+  "odm_zygote": "zygote64",
+  "odm_zygote_line": 146,
+  "property_loading_rule": "PropertyLoadBootDefaults collects into a map, allowing later values to override ro.* too; vendor is loaded before ODM, then product. ABI selection prefers product, ODM, vendor, system.",
+  "property_loading_source": "source/system/core/init/property_service.cpp:1012-1065,1117-1216",
+  "compile_abi_source": "source/build/make/core/board_config.mk:370-401 builds ABI32 only when TARGET_SUPPORTS_32_BIT_APPS=true; TARGET_2ND_ARCH can remain for native builds.",
+  "custom_vendor_init_override": "No custom vendor init library is configured in this device tree. The current source default vendor_load_properties is weak and empty. Built init/runtime overrides still require verification; recovery properties are not normal Android proof.",
+  "native32_file": {"elf_class": 1, "machine": 40, "runtime_required": "unproven"},
+  "selected_codec2_rc_executable": {"path": "/vendor/bin/hw/android.hardware.media.c2@1.2-mediatek-64b", "elf_class": 2, "machine": 183},
+  "kernel_compat_proves_app_support": false,
+  "native32_runtime_verified": false,
+  "built_dumpvars_verified": false,
+  "final_image_properties_and_zygote_verified": false
+}

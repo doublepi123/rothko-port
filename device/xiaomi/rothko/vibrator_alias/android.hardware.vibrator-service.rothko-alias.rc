@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: The LineageOS Project
+# SPDX-License-Identifier: Apache-2.0
+#
+# Registration-only alias: republishes the stock ODM vibrator feature node
+# under the standard /default name.
+#
+# Not critical, not oneshot, not disabled: it starts eagerly with class hal and
+# init restarts it if it exits. If the stock backend dies, the alias exits
+# itself so init reconnects it; it never reboots the device.
+#
+# Integration precondition: this must be the only publisher of
+# android.hardware.vibrator.IVibrator/default.
+
+service vendor.vibrator-rothko-alias /vendor/bin/hw/android.hardware.vibrator-service.mediatek
+    class hal
+    user system
+    group system
+    interface aidl android.hardware.vibrator.IVibrator/default

@@ -1,0 +1,75 @@
+// SPDX-FileCopyrightText: The LineageOS Project
+// SPDX-License-Identifier: Apache-2.0
+
+cc_defaults {
+    name: "rothko_udfpshandler_defaults",
+    vendor: true,
+    srcs: ["RothkoUdfpsHandler.cpp"],
+    header_libs: ["//hardware/xiaomi:xiaomifingerprint_headers"],
+}
+
+// Loaded by //hardware/xiaomi:android.hardware.biometrics.fingerprint-service.xiaomi.
+cc_library_shared {
+    name: "libudfpshandler",
+    defaults: ["rothko_udfpshandler_defaults"],
+    shared_libs: [
+        "libbase",
+        "libbinder_ndk",
+        "liblog",
+        "android.hardware.biometrics.fingerprint-V4-ndk",
+    ],
+}
+
+cc_library_static {
+    name: "librothko_udfpshandler",
+    defaults: ["rothko_udfpshandler_defaults"],
+    static_libs: [
+        "libbase",
+        "android.hardware.biometrics.fingerprint-V4-ndk",
+    ],
+    stl: "c++_static",
+}
+
+// The stock vendor image is still prebuilt: it can neither gain
+// libudfpshandler.so nor vendor properties. This variant links the handler
+// statically, compiles the sensor defaults in, keeps the template path of the
+// previous HAL, and replaces /vendor/bin/hw/mfp-daemon in place.
+cc_binary {
+    name: "android.hardware.biometrics.fingerprint-service.rothko-prebuilt-vendor",
+    vendor: true,
+    relative_install_path: "hw",
+    compile_multilib: "64",
+    srcs: ["//hardware/xiaomi:android.hardware.biometrics.fingerprint-service.xiaomi-srcs"],
+    cppflags: [
+        "-DIMPL_V2",
+        "-DXIAOMI_FINGERPRINT_DEFAULT_TYPE=\"udfps_optical\"",
+        "-DXIAOMI_FINGERPRINT_DEFAULT_SENSOR_ID=\"5\"",
+        "-DXIAOMI_FINGERPRINT_DEFAULT_SENSOR_LOCATION=\"610|2444|105\"",
+        "-DXIAOMI_FINGERPRINT_GROUP_PATH=\"/data/vendor_de/{}/fpdata\"",
+    ],
+    header_libs: [
+        "libhardware_headers",
+        "//hardware/xiaomi:android.hardware.biometrics.fingerprint-service.xiaomi-headers",
+        "//hardware/xiaomi:xiaomifingerprint_headers",
+    ],
+    shared_libs: [
+        "libbinder_ndk",
+        "libdl",
+        "libhardware",
+        "liblog",
+    ],
+    static_libs: [
+        "libbase",
+        "libcutils",
+        "android.hardware.biometrics.fingerprint-V4-ndk",
+        "android.hardware.biometrics.common-V4-ndk",
+        "android.hardware.biometrics.common.config",
+        "android.hardware.biometrics.common.thread",
+        "android.hardware.biometrics.common.util",
+        "android.hardware.keymaster-V4-ndk",
+        "//hardware/xiaomi:libandroid.hardware.biometrics.fingerprint.Props",
+        "//hardware/xiaomi:libudfpshandlerfactory",
+    ],
+    whole_static_libs: ["librothko_udfpshandler"],
+    stl: "c++_static",
+}

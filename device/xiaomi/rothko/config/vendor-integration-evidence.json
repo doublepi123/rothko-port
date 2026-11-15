@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "description": "Machine-readable vendor integration evidence extracted from the OS3.0.308.0.WNNCNXM firmware. This is not a compatibility pass; unresolved items are named.",
+  "sources": {
+    "inventory": {
+      "path": "firmware/reports/inventory.json",
+      "sha256": "967aab1b4fcd8ba989b21aa7ca714a3db80f48988222181b4780c5dd60048910"
+    },
+    "input_report": {
+      "path": "firmware/reports/input-report.md",
+      "sha256": "73e1273ea369c6094f9f51f5e858a925000aa3e01d5a7cca19eabd3dc4265400"
+    },
+    "boot_parameters": {
+      "path": "firmware/reports/boot-parameters.md",
+      "sha256": "d7c632239f3b36fdc08c5de8b3e80797cffe54b72e67a4a9a6e573fceffee974"
+    },
+    "nonbase_gaps": {
+      "path": "firmware/reports/nonbase-gaps.tsv",
+      "sha256": "89ac928f0a2c1ec08ce3771dc717bb9f2e0d8fcb154d839d8e4a08f7098e07b1"
+    },
+    "library_index": {
+      "path": "firmware/reports/library-index.tsv",
+      "sha256": "ee6cf10c9c797fd1740e806ec2f9263d1a4bad26819ed691ef8763dd93769051"
+    }
+  },
+  "vendor_api_level": 34,
+  "first_api_level": 34,
+  "framework_target_level": 8,
+  "sepolicy_version": "34.0",
+  "vndk_version": "34",
+  "vintf": {
+    "manifest_matrix_files": 96,
+    "hal_names": 139,
+    "kernel_versions": [],
+    "checkvintf_result": null,
+    "note": "FCM target-level 8 and vendor API 34; the boot image is Android 16 but the vendor/odm stack is Android 14/SDK 34. Do not set vendor API 36."
+  },
+  "selinux": {
+    "policy_files": 51,
+    "precompiled_present": true,
+    "neverallow_result": null,
+    "note": "Policy version 34.0; no neverallow check has been run."
+  },
+  "linker": {
+    "namespace_status": "unknown: no ld.config.txt/namespace search-path configuration was found in the acquired images",
+    "config_files": 10,
+    "public_libraries": 11,
+    "vndk_artifacts": 6,
+    "note": "Namespace reachability is unknown pending a build baseline/linker configuration; no pass is claimed."
+  },
+  "hal_elf": {
+    "hal_count": 77,
+    "library_index_entries": 2555,
+    "cross_partition_dependencies": 23,
+    "pending_framework_rows": 783,
+    "pending_framework_unique_libraries": 38,
+    "missing_nonbase": 8,
+    "unknown_nonbase_unique": 7,
+    "note": "lib64/hw false gaps were corrected. 38 unique framework-provided candidate libraries remain pending baseline; 8 non-base-tagged dependencies (mostly Android graphics/common/memtrack interfaces) are unresolved. 76 HALs have file candidates, including nested lib64/hw paths, but that is not proof of successful namespace linking. Do not assume system_ext provides any of these.",
+    "pending_framework_candidate_libraries": 38,
+    "missing_nonbase_unique_libraries": [
+      "android.hardware.memtrack-V1-ndk.so",
+      "android.hardware.graphics.common-V4-ndk.so",
+      "android.hardware.graphics.common@1.2.so",
+      "android.hardware.graphics.allocator-V2-ndk.so",
+      "android.hardware.common-V2-ndk.so",
+      "android.hardware.graphics.allocator@4.0.so",
+      "android.hardware.graphics.mapper@4.0.so"
+    ],
+    "missing_nonbase_note": "Mostly Android graphics/common/memtrack standard interface libraries. Their absence in the acquired images is not evidence that they are non-base libraries supplied by system_ext.",
+    "hals_with_file_candidates": 76,
+    "hals_with_framework_candidates": 77,
+    "linked_success_claimed": false,
+    "missing_nonbase_rows": 8,
+    "missing_nonbase_unique": 7,
+    "lib64_hw_false_gaps_corrected": true
+  },
+  "required_extra_partitions": [],
+  "status": "incomplete: no checkvintf result, no neverallow result, 38 framework-provided candidate libraries pending baseline, 8 non-base-tagged dependencies unresolved, linker namespace unknown",
+  "claim": "not passed; do not assume system_ext resolves the framework candidates or the graphics/common/memtrack interface libraries",
+  "evidence_limitations": [
+    "Authenticity is not claimed: no OTA metadata/payload signature or OEM trust-root verification.",
+    "No phone access, flashing, slot change or execution of image binaries was performed.",
+    "The extracted vendor/odm/dlkm images are integrity-checked against the payload manifest, not OEM-signature-authenticated.",
+    "The 38 unresolved non-base ELF libraries are listed, not guessed."
+  ],
+  "required_extra_partitions_note": "Empty only because unresolved framework candidates are pending baseline; it is not a claim that no extra partition or no system_ext dependency exists.",
+  "vndk_compatibility": {
+    "vndk_version": "34",
+    "status": "pending_build_baseline_products",
+    "requirements": [
+      "build Lineage system, system_ext and product baseline artifacts",
+      "check vendor HAL DT_NEEDED and linker namespace resolution against the built baseline",
+      "run checkvintf and SELinux neverallow against the built framework"
+    ],
+    "note": "The stock vendor stack is VNDK 34. Final compatibility cannot be established from the extracted vendor images alone."
+  }
+}

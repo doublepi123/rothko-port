@@ -1,0 +1,11 @@
+// Limited same-firmware capability layer; no global, NR or provisioning override.
+// Public source: stock CarrierConfig c6cf3ea310cb4db462cdff7cc3d667627460d4d564f303a9fa82cf0281504b01.
+runtime_resource_overlay {
+    name: "RothkoCarrierVoiceCapabilityOverlay",
+    manifest: "CarrierVoiceCapabilityOverlay/AndroidManifest.xml",
+    resource_dirs: ["CarrierVoiceCapabilityOverlay/res"],
+    // Provider compares MCC/MNC strings exactly; retain two-digit MNC raw values.
+    aaptflags: ["--keep-raw-values"],
+    certificate: "platform",
+    system_ext_specific: true,
+}

@@ -1,0 +1,54 @@
+// SPDX-FileCopyrightText: The LineageOS Project
+// SPDX-License-Identifier: Apache-2.0
+//
+// Registration-only opaque Binder alias for the Rothko vibrator HAL.
+//
+// This module deliberately does NOT depend on android.hardware.vibrator-V1-ndk
+// (or any typed HAL interface). It only moves the stock feature service's
+// binder handle to the /default name; the node itself remains the stock HAL.
+//
+// The stem matches the stock vendor_file_contexts rule
+// /(vendor|system/vendor)/bin/hw/android\.hardware\.vibrator-service\.mediatek
+// (hal_vibrator_default_exec), so no new type/file_contexts is added.
+//
+// No vintf_fragments: the ODM manifest uses override="true" and replaces any
+// vendor declaration. /default must be added to that same ODM HAL and both
+// instances must stay declared (see staged-vintf/).
+
+cc_binary {
+    name: "android.hardware.vibrator-service.rothko-alias",
+    stem: "android.hardware.vibrator-service.mediatek",
+    relative_install_path: "hw",
+    vendor: true,
+    compile_multilib: "64",
+    init_rc: ["android.hardware.vibrator-service.rothko-alias.rc"],
+    local_include_dirs: ["."],
+    srcs: [
+        "service.cpp",
+    ],
+    shared_libs: [
+        "libbase",
+        "libbinder_ndk",
+        "liblog",
+    ],
+}
+
+// Host-only test for the deterministic decision core. gtest is disabled so the
+// test file owns main() and has no extra framework dependency. This module is
+// not part of any device image.
+cc_test_host {
+    name: "android.hardware.vibrator-service.rothko-alias-decision-test",
+    gtest: false,
+    local_include_dirs: ["."],
+    srcs: [
+        "alias_decision_tests.cpp",
+    ],
+}
+
+prebuilt_etc {
+    name: "rothko_vibrator_alias_odm_manifest",
+    device_specific: true,
+    src: "vendor.xiaomi.hardware.vibratorfeature.service.xml",
+    filename: "vendor.xiaomi.hardware.vibratorfeature.service.xml",
+    sub_dir: "vintf/manifest",
+}
