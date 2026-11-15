@@ -1,0 +1,18 @@
+Rothko source preparation
+
+Original preparation scripts and documentation are licensed under Apache-2.0
+unless a file states otherwise. See LICENSE. This notice does not relicense
+upstream code, generated interfaces, vendor firmware or Google applications.
+
+Patches preserve their upstream project copyright headers and authorship.
+LineageOS and AOSP changes are based on the exact repository URLs and commits
+listed in patches/BASES.tsv. UdfpsHandler follows LineageOS Xiaomi device
+implementations; the device handler retains its LineageOS copyright header.
+
+The historical mfp-daemon-rs repository is based on hoshikv/mfp-daemon-rs,
+commit 2f42d751554db496b055ebb64e3e425acffccf04. Its LICENSE and NOTICE remain
+in that separate repository; it is superseded, not part of the active stack.
+
+Proprietary firmware, APKs, extracted images, private keys and voice models
+are excluded. Extraction recipes and hashes do not grant redistribution rights.
+No claim of official LineageOS affiliation or acceptance is made.

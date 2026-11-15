@@ -1,56 +1,63 @@
-# Porting notes
+# 移植笔记
 
-## Screen-off "Hey Google" (SCP DSP hotword)
+## 指纹：当前方案
 
-- The CN SCP firmware reports the MediaTek default engine, so Google's app
-  stays on software hotword (`trusted_hotword_software`) and cannot wake the
-  device from screen-off.
-- The global `OS3.0.303.0.WNNMIXM` SCP image contains the Google engine.
-  It matches the CN build closely enough to swap: same signing certificate,
-  byte-identical scp/vow/sensorhub kernel modules, identical SCP device-tree
-  nodes. The bootloader loads SCP only on a normal Linux boot (not from
-  fastboot or recovery), and `scp` is not covered by vbmeta.
-- With that SCP the engine is TFLite. It needs the v36 hotword enrollment
-  apps and the matching `common.util` library from the same global build.
-  With the `com.mediatek.hardware.vow.gva.tflite` feature declared, they
-  choose `config_tflite.xml` / `*.tflite` models. zh-CN maps to
-  `*_small_universal`. The older v35 apps send the legacy `.mmap` model,
-  which crashes the SCP about 330 ms after `VOW_MODEL_START`.
-- `VoWMicSetting_AudioParam.xml` `dual_ch_transfer` was aligned with the
-  global value (0). On its own it did not stop the crash.
-- Package manager caches system_ext packages by directory mtime. When
-  replacing them, bump the directory and file mtimes or the old version stays
-  active.
+使用 Lineage `hardware/xiaomi` AIDL 指纹服务（IMPL_V2），加载
+`fingerprint.goodix_fod.so`，设备侧 `udfps/RothkoUdfpsHandler.cpp`
+负责局部高亮和按压。官方源码的 `hw_get_module_by_class` 未找到
+不带变体后缀的库；当前分支增加直接加载该文件的兼容路径。
+这只是在本机整理成独立提交，还未提交上游。
 
-## Vibration
+handler 收到按压后发 extCmd 1，使用 mi_display 的 local-HBM
+ioctl `0x400c440e`，显示事件 type 2 表示可采图后发 extCmd 10。
+释放时结束高亮与按压。息屏时通过 TouchFeature mode 10 和
+`fod_press_status` 获得接触；Goodix 匹配成功后，框架按标准
+生物识别路径唤醒。当前实验未添加新的 AOSP UDFPS 传感器。
 
-The stock HAL registers only `IVibrator/vibratorfeature`, not
-`IVibrator/default`. Two things make vibration work: the
-`vibrator_alias` service in the device tree, and a fallback to that
-instance in `frameworks/native`'s `VibratorHalController`.
+对照参考：
 
-## Under-display fingerprint
+- [Lineage peridot UdfpsHandler](https://github.com/LineageOS/android_device_xiaomi_peridot)
+- [Lineage mt6895-common](https://github.com/LineageOS/android_device_xiaomi_mt6895-common)
+- [Lineage hardware/xiaomi](https://github.com/LineageOS/android_hardware_xiaomi)
 
-- The fingerprint HAL is LineageOS `hardware/xiaomi`'s AIDL service
-  (`IMPL_VER V2`) with a rothko `UdfpsHandler` (device `udfps/`). It loads
-  the stock Goodix legacy HAL, `/odm/lib64/hw/fingerprint.goodix_fod.so`.
-- `hw_get_module_by_class()` never finds that file because it has no
-  variant suffix. The `hardware/xiaomi` patch falls back to dlopen()ing it.
-- Handler, per press: `extCmd(1, 1)` for finger down, local HBM via
-  `/dev/mi_display/disp_feature` (ioctl `0x400c440e`, value 2), then
-  `extCmd(10, 1|6)` when the display event (type 2) reports the FOD layer
-  ready. Release reverses this.
-- Screen off: the handler enables TouchFeature mode 10 and polls
-  `/sys/class/touch/touch_dev/fod_press_status`. Keyguard authentication
-  stays running while the screen is off, so a screen-off press is captured
-  directly by the HAL and the framework wakes on `onAuthenticated`. This
-  matches LineageOS mt6895-common. No framework changes are needed.
-- Tested with stock (FOD-patch-free) services and SystemUI: lit and
-  screen-off unlock, including quick taps, about 150 ms per match.
-- Keep the template group path `/data/vendor_de/<user>/fpdata` (no
-  trailing slash) when migrating from the stock HAL, or existing templates
-  are not found.
-- SystemUI sizes the UDFPS icon from `pixel_pitch`. rothko is 57.0 um
-  (1220x2712 at 445.614 dpi), set in the SystemUI geometry overlay.
-- The earlier `mfp-daemon-rs` fork and the frameworks/base FOD patch are
-  superseded by this stack.
+`fingerprint.mk` 是将来构建 vendor 时的集成片段，当前不被
+device.mk 引入。当前预编译 vendor 使用静态链接的兼容构建目标，
+其正式整理版本仅编译验证过，手机仍运行 spike02 版本。
+请勿把共享库构建成功说成共享库形态已经在手机加载过。
+
+传感器中心 `(610,2444)`、半径 `105`、sensor ID `5` 延续现有
+数据。实验保持模板路径 `/data/vendor_de/<user>/fpdata`。
+去掉末尾斜杠是本次迁移采用的兼容选择，没有用 A/B 实验证明
+斜杠本身必然造成模板丢失。
+
+## 指纹图标
+
+原版 SystemUI 通过 `udfps_icon_size / pixel_pitch` 计算尺寸；
+默认 `pixel_pitch=-1` 对本机不合适。设备 SystemUI 几何 RRO
+配置 `57.0` 微米（`25400 / 445.614 dpi`），用户已确认显示恢复正常。
+无需恢复旧的框架图标 padding 兜底。
+
+## 振动
+
+原厂服务暴露 `IVibrator/vibratorfeature`。当前方案保留设备树的
+alias 和 frameworks/native 的实例回退，真机振动已确认。
+它们是否可以进一步合并成单一路径需要独立验证，本轮不删除。
+
+## Hey Google 硬件热词
+
+CN SCP 对外报告默认引擎；global 303 SCP 可提供 Google 引擎。
+全局固件的 TFLite 引擎需要匹配的 v36 录入 APK、common.util.jar
+和 `com.mediatek.hardware.vow.gva.tflite` 特性。旧 v35 的 mmap 模型
+在早期试验中触发 SCP 崩溃。
+
+`VoWMicSetting_AudioParam.xml` 的 `dual_ch_transfer` 设为 global
+值 0；单独修改它并未解决崩溃。SCP、模型、APK 和共享库匹配才是
+该轮实验的关键。system_ext 替换包时还需考虑 PackageManager 缓存。
+
+最近一次故障的现场为：DSP 枚举正常、v36 包和权限存在，但 enrolled
+model 为空、GSA 没有 detector。**无法从已保留日志判断是谁、何时、
+为什么清除了模型，也不能证明它与框架替换无关。**
+用户重新训练 Voice Match 后确认亮屏和息屏都恢复。
+重录后的 DSP LOAD/START 未捕获，验证边界见验证记录。
+
+硬件热词依赖的专有组件不包含在本包里，也不与官方设备申请绑定。
