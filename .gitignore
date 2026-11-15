@@ -1,0 +1,10 @@
+# Proprietary stock images are local inputs, not repository content.
+/prebuilt/*.img
+/prebuilt/staged-manifest.json
+/prebuilt/.staging-*/
+/proprietary/
+
+__pycache__/
+*.pyc
+/derived/*.img
+/derived/.staging-*/

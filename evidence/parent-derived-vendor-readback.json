@@ -1,0 +1,22 @@
+{
+  "scope": "Parent independent implementation: fresh private read-only mounts, complete content/metadata/xattr comparison",
+  "paths": 6262,
+  "xattrs_compared": 6262,
+  "allowed_modifications": [
+    {
+      "path": "etc/fstab.emmc",
+      "removed_lines": 25,
+      "derived_sha256": "6976f97d84a452da3ee9bc0f2d9eeaab49643c59f5780910e705c9a491ae377c"
+    },
+    {
+      "path": "etc/fstab.mt6989",
+      "removed_lines": 25,
+      "derived_sha256": "cac4495924ce8ecb21303a15193dfe2aee45ee5cc90a6cde4714642d34c04ee1"
+    }
+  ],
+  "unexpected_differences": [],
+  "hardlink_groups_match": true,
+  "derived_sha256": "2047c0c60690a2763afb7043a271f26e35cf292d564be6882c113d230c55cc58",
+  "no_phone_operations": true,
+  "ok": true
+}

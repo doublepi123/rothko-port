@@ -1,0 +1,112 @@
+{
+  "avb_verified": false,
+  "blob_fixups": [],
+  "derived": {
+    "vendor": {
+      "header": {
+        "magic": "EROFS",
+        "superblock_offset": 1024
+      },
+      "only_allowed_fstabs_change": true,
+      "original": {
+        "path": "prebuilt/vendor.img",
+        "sha256": "e417733a560a5a60c0e9c1e4ddf4475a75ae49558f8c73c11dcc10795400ced3",
+        "size": 1644716032
+      },
+      "original_stock": "vendor",
+      "path": "derived/vendor.img",
+      "readback": {
+        "base": "vendor_root",
+        "ok": true,
+        "path": "evidence/parent-derived-vendor-readback.json",
+        "sha256": "78aeebf3f524e1560cd1c7878d1eec8ed3513d231770ae04a4a818b452d1cb1d",
+        "snapshot": true
+      },
+      "recipe_code_sha256": "b1151ff0c31ffa03839c4ef150ddbc97424f49880e94c10f36a9e6da19185a43",
+      "recipe_files": [
+        "vendor-repack/scripts/build_pipeline.sh",
+        "vendor-repack/scripts/erofs_meta.py",
+        "vendor-repack/scripts/make_tar.py",
+        "vendor-repack/scripts/transform_fstab.py",
+        "vendor-repack/scripts/write_report.py"
+      ],
+      "release_ready": false,
+      "sha256": "2047c0c60690a2763afb7043a271f26e35cf292d564be6882c113d230c55cc58",
+      "signed": false,
+      "size": 1614061568,
+      "source": "vendor-repack/output/vendor.img",
+      "source_sha256": "2047c0c60690a2763afb7043a271f26e35cf292d564be6882c113d230c55cc58",
+      "source_size": 1614061568
+    },
+    "vendor_boot": {
+      "header": {
+        "dtb_addr": "0x47c80000",
+        "dtb_size": 444690,
+        "header_version": 4,
+        "kernel_addr": "0x40000000",
+        "magic": "VNDRBOOT",
+        "page_size": 4096,
+        "ramdisk_addr": "0x66f00000"
+      },
+      "only_allowed_fstabs_change": true,
+      "original": {
+        "path": "prebuilt/vendor_boot.img",
+        "sha256": "b0028698bbe0eb5696dd4af22b9ca575708199f69ce96f240fc64503273a9d83",
+        "size": 67108864
+      },
+      "original_stock": "vendor_boot",
+      "path": "derived/vendor_boot.img",
+      "readback": {
+        "base": "vendor_root",
+        "ok": true,
+        "path": "evidence/parent-derived-vendor-boot-readback.json",
+        "sha256": "c74b02a86c9bccf65d00e77030cbdc08cbc61e1b1441da87760439f88fdccfd4",
+        "snapshot": true
+      },
+      "recipe_code_sha256": "c7d3ea31aae7cc079788513bc34fe47a4d49be5fd5c022c3f610f073b9c9d168",
+      "recipe_files": [
+        "repack/scripts/cpio_newc.py",
+        "repack/scripts/expected-inputs.json",
+        "repack/scripts/fstab_transform.py",
+        "repack/scripts/lz4_legacy.py",
+        "repack/scripts/repack.py",
+        "repack/scripts/vendor_boot.py"
+      ],
+      "release_ready": false,
+      "sha256": "7c2e53230218a20c9f8b9b356df47451e09080ae0aed0a07502027b3f62aa4f4",
+      "signed": false,
+      "size": 67108864,
+      "source": "repack/output/vendor_boot.img",
+      "source_sha256": "7c2e53230218a20c9f8b9b356df47451e09080ae0aed0a07502027b3f62aa4f4",
+      "source_size": 67108864
+    }
+  },
+  "derived_source_manifest_sha256": "1c1f7d46dea2cecdc3ba6fe1b5c36b8743d1229b694811d0c9e625b305bdb4eb",
+  "device": "rothko",
+  "generated_utc": "2026-10-31T14:14:20Z",
+  "hardware_release_ready": false,
+  "model": "2407FRK8EC",
+  "notes": [
+    "Only fstab lines were removed by the reviewed recipes; no AVB/signature claim.",
+    "The nine stock prebuilt images were not modified.",
+    "Derived images are local test inputs, not a release OTA."
+  ],
+  "only_allowed_fstabs_change": true,
+  "payload_manifest_sha256": "25cb38be498d09100bb95cfc12fe2ffe43f4878a49265837d2e940289d23c833",
+  "release_ready": false,
+  "schema": 1,
+  "signed": false,
+  "source_manifest_sha256": "6f371ad85384e1e246a0dfb50899a46a0aa789ca5ba214a7d07a327e9e955a72",
+  "stock": {
+    "vendor": {
+      "path": "prebuilt/vendor.img",
+      "sha256": "e417733a560a5a60c0e9c1e4ddf4475a75ae49558f8c73c11dcc10795400ced3",
+      "size": 1644716032
+    },
+    "vendor_boot": {
+      "path": "prebuilt/vendor_boot.img",
+      "sha256": "b0028698bbe0eb5696dd4af22b9ca575708199f69ce96f240fc64503273a9d83",
+      "size": 67108864
+    }
+  }
+}

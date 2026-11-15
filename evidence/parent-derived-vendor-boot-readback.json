@@ -1,0 +1,41 @@
+{
+  "scope": "Parent independent raw v4/newc parser and full-member comparison, no extraction/repack code reused",
+  "ok": true,
+  "header_fields_preserved_except_ramdisk_size": true,
+  "dtb_container_and_bootconfig_identical": true,
+  "fragment_types_names_board_ids_order_identical": true,
+  "no_old_avb_footer_carried": true,
+  "sha256": "7c2e53230218a20c9f8b9b356df47451e09080ae0aed0a07502027b3f62aa4f4",
+  "fragments": [
+    {
+      "index": 0,
+      "members_including_trailer": 756,
+      "changed": [
+        {
+          "path": "first_stage_ramdisk/fstab.mt6989",
+          "removed_lines": 25,
+          "sha256": "cac4495924ce8ecb21303a15193dfe2aee45ee5cc90a6cde4714642d34c04ee1"
+        }
+      ],
+      "all_other_members_metadata_and_content_identical": true
+    },
+    {
+      "index": 1,
+      "members_including_trailer": 646,
+      "changed": [
+        {
+          "path": "first_stage_ramdisk/fstab.emmc",
+          "removed_lines": 25,
+          "sha256": "6976f97d84a452da3ee9bc0f2d9eeaab49643c59f5780910e705c9a491ae377c"
+        },
+        {
+          "path": "system/etc/recovery.fstab",
+          "removed_lines": 25,
+          "sha256": "cac4495924ce8ecb21303a15193dfe2aee45ee5cc90a6cde4714642d34c04ee1"
+        }
+      ],
+      "all_other_members_metadata_and_content_identical": true
+    }
+  ],
+  "no_phone_operations": true
+}
