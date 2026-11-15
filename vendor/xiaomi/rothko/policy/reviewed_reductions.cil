@@ -1,0 +1,3 @@
+(deny system_server_34_0 self (capability (sys_module)))
+(deny virtual_face virtual_face_prop (file (read open)))
+(deny virtual_fingerprint virtual_fingerprint_prop (file (read open)))

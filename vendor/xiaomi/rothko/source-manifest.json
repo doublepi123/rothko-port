@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "lane": "vendor/xiaomi/rothko",
+  "device": "rothko",
+  "model": "2407FRK8EC",
+  "market_name": "Redmi K70 Ultra",
+  "allowed_models": [
+    "2407FRK8EC"
+  ],
+  "region": "CN",
+  "firmware_branch": "WNNCNXM",
+  "firmware": "OS3.0.308.0.WNNCNXM",
+  "distribution": "local staging only; proprietary images are not committed",
+  "fixups": [],
+  "payload_manifest": {
+    "sha256": "25cb38be498d09100bb95cfc12fe2ffe43f4878a49265837d2e940289d23c833",
+    "source": "firmware/manifest/payload_manifest.bin",
+    "parent_expectations": "logs/parent-manifest-expectations.json"
+  },
+  "images": {
+    "boot": {
+      "source": "../offline-k70u/images/boot.img",
+      "size": 67108864,
+      "sha256": "462fbecbc89db679a454be37dfeac1d60f47d3d82207ce8cab2b3cbee9145f9e",
+      "kind": "boot"
+    },
+    "init_boot": {
+      "source": "../offline-k70u/images/init_boot.img",
+      "size": 8388608,
+      "sha256": "b7acb150c417af59506ccaa7770684b1455578f3d40589e35d7057c93cac2507",
+      "kind": "boot"
+    },
+    "vendor_boot": {
+      "source": "../offline-k70u/images/vendor_boot.img",
+      "size": 67108864,
+      "sha256": "b0028698bbe0eb5696dd4af22b9ca575708199f69ce96f240fc64503273a9d83",
+      "kind": "vendor_boot"
+    },
+    "dtbo": {
+      "source": "../offline-k70u/images/dtbo.img",
+      "size": 8388608,
+      "sha256": "70221d0d6d28bb0f325bd1243ed7bc569298ddbd0982f5b2890cd81ade855a33",
+      "kind": "dtbo"
+    },
+    "vendor": {
+      "source": "firmware/images/vendor.img",
+      "size": 1644716032,
+      "sha256": "e417733a560a5a60c0e9c1e4ddf4475a75ae49558f8c73c11dcc10795400ced3",
+      "kind": "erofs"
+    },
+    "odm": {
+      "source": "firmware/images/odm.img",
+      "size": 881057792,
+      "sha256": "7e9ae9013b9c449eae83321fefc04cd430f4941129b3a33519e166619b0653e5",
+      "kind": "erofs"
+    },
+    "system_dlkm": {
+      "source": "firmware/images/system_dlkm.img",
+      "size": 7471104,
+      "sha256": "df485f93fb3b5a305b254c40337de953c0be2ca1450ec7b522c91a4dce61e9ea",
+      "kind": "erofs"
+    },
+    "vendor_dlkm": {
+      "source": "firmware/images/vendor_dlkm.img",
+      "size": 21970944,
+      "sha256": "c050e3f48404c4637baa5bcd39c1620c638eb7e2de4c69c703965959147de942",
+      "kind": "erofs"
+    },
+    "odm_dlkm": {
+      "source": "firmware/images/odm_dlkm.img",
+      "size": 348160,
+      "sha256": "fc59d5085c32bbfa950481c7c9e7484c7dffa05716e4714b483341a7c34aac48",
+      "kind": "erofs"
+    }
+  }
+}

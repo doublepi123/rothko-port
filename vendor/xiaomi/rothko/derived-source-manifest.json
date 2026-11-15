@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "device": "rothko",
+  "model": "2407FRK8EC",
+  "market_name": "Redmi K70 Ultra",
+  "source_manifest": "source-manifest.json",
+  "scope": "derived inputs only; stock prebuilt images remain immutable",
+  "derived": {
+    "vendor_boot": {
+      "source": "repack/output/vendor_boot.img",
+      "size": 67108864,
+      "sha256": "7c2e53230218a20c9f8b9b356df47451e09080ae0aed0a07502027b3f62aa4f4",
+      "original_stock": "vendor_boot",
+      "readback": "logs/parent-derived-vendor-boot-readback.json",
+      "readback_sha256": "c74b02a86c9bccf65d00e77030cbdc08cbc61e1b1441da87760439f88fdccfd4",
+      "only_allowed_fstabs_change": true,
+      "recipe_files": [
+        "repack/scripts/repack.py",
+        "repack/scripts/vendor_boot.py",
+        "repack/scripts/fstab_transform.py",
+        "repack/scripts/cpio_newc.py",
+        "repack/scripts/lz4_legacy.py",
+        "repack/scripts/expected-inputs.json"
+      ]
+    },
+    "vendor": {
+      "source": "vendor-repack/output/vendor.img",
+      "size": 1614061568,
+      "sha256": "2047c0c60690a2763afb7043a271f26e35cf292d564be6882c113d230c55cc58",
+      "original_stock": "vendor",
+      "readback": "logs/parent-derived-vendor-readback.json",
+      "readback_sha256": "78aeebf3f524e1560cd1c7878d1eec8ed3513d231770ae04a4a818b452d1cb1d",
+      "only_allowed_fstabs_change": true,
+      "recipe_files": [
+        "vendor-repack/scripts/build_pipeline.sh",
+        "vendor-repack/scripts/transform_fstab.py",
+        "vendor-repack/scripts/make_tar.py",
+        "vendor-repack/scripts/erofs_meta.py",
+        "vendor-repack/scripts/write_report.py"
+      ]
+    }
+  },
+  "signed": false,
+  "release_ready": false,
+  "hardware_release_ready": false
+}
