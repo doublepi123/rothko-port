@@ -1,0 +1,145 @@
+From 918e62ba295344d481a98307a63b505d5a467000 Mon Sep 17 00:00:00 2001
+From: lcy <admin@luchenyang.xyz>
+Date: Sun, 15 Nov 2026 17:54:07 +0800
+Subject: [PATCH 2/2] fingerprint: Allow building the AIDL HAL for a prebuilt
+ vendor image
+
+Export the AIDL service sources and headers, let a binary link its UDFPS
+handler statically, and allow the sensor defaults and template group path
+to be compiled in. This lets a device replace its stock fingerprint HAL in
+a prebuilt vendor image, where neither libudfpshandler.so nor vendor
+properties can be added, while keeping existing enrollments.
+---
+ aidl/fingerprint/Android.bp            | 26 ++++++++++++++++++++------
+ aidl/fingerprint/FingerprintConfig.cpp | 18 +++++++++++++++---
+ aidl/fingerprint/Session.cpp           |  8 +++++++-
+ fingerprint/UdfpsHandler.cpp           |  9 +++++++++
+ 4 files changed, 51 insertions(+), 10 deletions(-)
+
+diff --git a/aidl/fingerprint/Android.bp b/aidl/fingerprint/Android.bp
+index 96ca610..5a78369 100644
+--- a/aidl/fingerprint/Android.bp
++++ b/aidl/fingerprint/Android.bp
+@@ -5,12 +5,8 @@
+ // SPDX-License-Identifier: Apache-2.0
+ //
+ 
+-cc_binary {
+-    name: "android.hardware.biometrics.fingerprint-service.xiaomi",
+-    defaults: ["xiaomi_hardware_biometrics_config_default"],
+-    relative_install_path: "hw",
+-    init_rc: ["android.hardware.biometrics.fingerprint-service.xiaomi.rc"],
+-    vintf_fragments: ["android.hardware.biometrics.fingerprint-service.xiaomi.xml"],
++filegroup {
++    name: "android.hardware.biometrics.fingerprint-service.xiaomi-srcs",
+     srcs: [
+         "CancellationSignal.cpp",
+         "Fingerprint.cpp",
+@@ -19,6 +15,24 @@ cc_binary {
+         "Session.cpp",
+         "service.cpp",
+     ],
++}
++
++cc_library_headers {
++    name: "android.hardware.biometrics.fingerprint-service.xiaomi-headers",
++    export_include_dirs: [
++        ".",
++        "include",
++    ],
++    vendor: true,
++}
++
++cc_binary {
++    name: "android.hardware.biometrics.fingerprint-service.xiaomi",
++    defaults: ["xiaomi_hardware_biometrics_config_default"],
++    relative_install_path: "hw",
++    init_rc: ["android.hardware.biometrics.fingerprint-service.xiaomi.rc"],
++    vintf_fragments: ["android.hardware.biometrics.fingerprint-service.xiaomi.xml"],
++    srcs: [":android.hardware.biometrics.fingerprint-service.xiaomi-srcs"],
+     local_include_dirs: [
+         "include",
+     ],
+diff --git a/aidl/fingerprint/FingerprintConfig.cpp b/aidl/fingerprint/FingerprintConfig.cpp
+index 77edc8b..8c9c716 100644
+--- a/aidl/fingerprint/FingerprintConfig.cpp
++++ b/aidl/fingerprint/FingerprintConfig.cpp
+@@ -15,6 +15,18 @@
+ 
+ using namespace ::android::fingerprint::xiaomi;
+ 
++// Builds for prebuilt vendor images cannot ship vendor properties; they may
++// compile the sensor defaults in instead.
++#ifndef XIAOMI_FINGERPRINT_DEFAULT_TYPE
++#define XIAOMI_FINGERPRINT_DEFAULT_TYPE ""
++#endif
++#ifndef XIAOMI_FINGERPRINT_DEFAULT_SENSOR_ID
++#define XIAOMI_FINGERPRINT_DEFAULT_SENSOR_ID "0"
++#endif
++#ifndef XIAOMI_FINGERPRINT_DEFAULT_SENSOR_LOCATION
++#define XIAOMI_FINGERPRINT_DEFAULT_SENSOR_LOCATION ""
++#endif
++
+ namespace aidl::android::hardware::biometrics::fingerprint {
+ 
+ // Wrapper to system property access functions
+@@ -38,9 +50,9 @@ CREATE_GETTER_SETTER_WRAPPER(control_illumination, OptBool)
+ // Name, Getter, Setter, Parser and default value
+ #define NGS(_NAME_) #_NAME_, _NAME_##Getter, _NAME_##Setter
+ static Config::Data configData[] = {
+-        {NGS(type), &Config::parseString, ""},
+-        {NGS(sensor_id), &Config::parseInt32, "0"},
+-        {NGS(sensor_location), &Config::parseString, ""},
++        {NGS(type), &Config::parseString, XIAOMI_FINGERPRINT_DEFAULT_TYPE},
++        {NGS(sensor_id), &Config::parseInt32, XIAOMI_FINGERPRINT_DEFAULT_SENSOR_ID},
++        {NGS(sensor_location), &Config::parseString, XIAOMI_FINGERPRINT_DEFAULT_SENSOR_LOCATION},
+         {NGS(sensor_strength), &Config::parseInt32, "2"},  // STRONG
+         {NGS(navigation_gesture), &Config::parseBool, "false"},
+         {NGS(detect_interaction), &Config::parseBool, "false"},
+diff --git a/aidl/fingerprint/Session.cpp b/aidl/fingerprint/Session.cpp
+index b935731..1e00982 100644
+--- a/aidl/fingerprint/Session.cpp
++++ b/aidl/fingerprint/Session.cpp
+@@ -11,6 +11,12 @@
+ 
+ #include "CancellationSignal.h"
+ 
++// Devices migrating existing templates may need the exact group path of
++// their previous HAL.
++#ifndef XIAOMI_FINGERPRINT_GROUP_PATH
++#define XIAOMI_FINGERPRINT_GROUP_PATH "/data/vendor_de/{}/fpdata/"
++#endif
++
+ namespace aidl::android::hardware::biometrics::fingerprint {
+ 
+ void onClientDeath(void* cookie) {
+@@ -30,7 +36,7 @@ Session::Session(fingerprint_device_t* device, UdfpsHandler* udfpsHandler, int u
+       mUdfpsHandler(udfpsHandler) {
+     mDeathRecipient = AIBinder_DeathRecipient_new(onClientDeath);
+ 
+-    auto path = std::format("/data/vendor_de/{}/fpdata/", userId);
++    auto path = std::format(XIAOMI_FINGERPRINT_GROUP_PATH, userId);
+     mDevice->set_active_group(mDevice, mUserId, path.c_str());
+ }
+ 
+diff --git a/fingerprint/UdfpsHandler.cpp b/fingerprint/UdfpsHandler.cpp
+index 02c3c34..1f7efeb 100644
+--- a/fingerprint/UdfpsHandler.cpp
++++ b/fingerprint/UdfpsHandler.cpp
+@@ -10,7 +10,16 @@
+ #define UDFPS_HANDLER_LIB_NAME "libudfpshandler.so"
+ #define UDFPS_HANDLER_FACTORY "UDFPS_HANDLER_FACTORY"
+ 
++// A binary may link its handler statically, e.g. when it replaces a HAL in
++// a prebuilt vendor image and cannot add libudfpshandler.so.
++extern "C" UdfpsHandlerFactory staticUdfpsHandlerFactory __asm__(UDFPS_HANDLER_FACTORY)
++        __attribute__((weak));
++
+ UdfpsHandlerFactory* getUdfpsHandlerFactory() {
++    if (&staticUdfpsHandlerFactory != nullptr) {
++        return &staticUdfpsHandlerFactory;
++    }
++
+     void* libudfpshander;
+     UdfpsHandlerFactory* factory_handler;
+ 

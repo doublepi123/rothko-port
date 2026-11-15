@@ -31,14 +31,26 @@ instance in `frameworks/native`'s `VibratorHalController`.
 
 ## Under-display fingerprint
 
-- `mfp-daemon-rs` (rothko branch) replaces the stock `mfp-daemon`. The
-  framework side (frameworks/base patch) drives the FodEngine 2.0 monitor,
-  lease and release commands. It also handles screen-off wake presses.
-- Intermittent "screen wakes but never unlocks": a quick screen-off press
-  (about 80 ms) produces only `GF_ERROR_TOO_FAST`. That acquired notice
-  never resumes the request, and the framework de-duplicates the monitor
-  command. If the re-arm after the wake release is lost, the touch FOD
-  monitor (`Touch_Fod_Enable`) stays off until the next screen-off. The
-  fix in commit "fod: re-arm ON monitor after a screen-off wake press
-  release" falls back to a full revalidated re-arm. It also re-syncs the
-  monitor after every successful lease stop.
+- The fingerprint HAL is LineageOS `hardware/xiaomi`'s AIDL service
+  (`IMPL_VER V2`) with a rothko `UdfpsHandler` (device `udfps/`). It loads
+  the stock Goodix legacy HAL, `/odm/lib64/hw/fingerprint.goodix_fod.so`.
+- `hw_get_module_by_class()` never finds that file because it has no
+  variant suffix. The `hardware/xiaomi` patch falls back to dlopen()ing it.
+- Handler, per press: `extCmd(1, 1)` for finger down, local HBM via
+  `/dev/mi_display/disp_feature` (ioctl `0x400c440e`, value 2), then
+  `extCmd(10, 1|6)` when the display event (type 2) reports the FOD layer
+  ready. Release reverses this.
+- Screen off: the handler enables TouchFeature mode 10 and polls
+  `/sys/class/touch/touch_dev/fod_press_status`. Keyguard authentication
+  stays running while the screen is off, so a screen-off press is captured
+  directly by the HAL and the framework wakes on `onAuthenticated`. This
+  matches LineageOS mt6895-common. No framework changes are needed.
+- Tested with stock (FOD-patch-free) services and SystemUI: lit and
+  screen-off unlock, including quick taps, about 150 ms per match.
+- Keep the template group path `/data/vendor_de/<user>/fpdata` (no
+  trailing slash) when migrating from the stock HAL, or existing templates
+  are not found.
+- SystemUI sizes the UDFPS icon from `pixel_pitch`. rothko is 57.0 um
+  (1220x2712 at 445.614 dpi), set in the SystemUI geometry overlay.
+- The earlier `mfp-daemon-rs` fork and the frameworks/base FOD patch are
+  superseded by this stack.

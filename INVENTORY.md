@@ -13,7 +13,8 @@
 | bootable/recovery | 1 commit on LineageOS `acd99f7c` | normal-exit bridge, loader guard |
 | system/sepolicy | 4 commits on LineageOS `885cc500` | system_ext CIL additions, native zygote gate, checked revisions |
 | external/perfetto | 1 commit on AOSP `df0f96de` | non-blocking kernel wakelock tracing |
-| mfp-daemon-rs | 2 commits on hoshikv `2f42d751` | rothko port, screen-off re-arm fix |
+| hardware/xiaomi | 2 commits on LineageOS `f71c6821` | load unsuffixed legacy HAL; prebuilt-vendor build of the AIDL HAL |
+| mfp-daemon-rs | 2 commits on hoshikv `2f42d751` | superseded by hardware/xiaomi + rothko UdfpsHandler |
 | rothko-image-tools | original | verified to reproduce the shipped vendor image byte for byte |
 
 Local-only build-host tweaks to `build/soong` and `build/blueprint` are not
@@ -35,8 +36,10 @@ exported.
 The reference build applied these on images after `m`. They are documented
 in PORTING-NOTES.md but are not yet build rules:
 
-1. `/vendor/bin/hw/mfp-daemon` replaced by the `mfp-daemon-rs` build
-   (`rothko-image-tools/erofs_replace_file.py`).
+1. `/vendor/bin/hw/mfp-daemon` replaced by
+   `android.hardware.biometrics.fingerprint-service.rothko-prebuilt-vendor`
+   (`rothko-image-tools/erofs_replace_file.py`). With a source-built vendor,
+   include `fingerprint.mk` instead.
 2. `/vendor/etc/audio_param/VoWMicSetting_AudioParam.xml`:
    `dual_ch_transfer` 1 -> 0 (global firmware value).
 3. system_ext: the two v36 hotword enrollment apps, the

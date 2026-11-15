@@ -1,0 +1,60 @@
+From 0698a0bde0936f9d2b788c8876ecdc3a61dfc451 Mon Sep 17 00:00:00 2001
+From: lcy <admin@luchenyang.xyz>
+Date: Sun, 15 Nov 2026 17:54:07 +0800
+Subject: [PATCH 1/2] fingerprint: aidl: Load unsuffixed legacy HAL modules
+ directly
+
+hw_get_module_by_class() only probes <id>.<class>.<variant>.so and
+<id>.<class>.default.so. Some stock vendor images (e.g. MediaTek based
+Xiaomi devices shipping /odm/lib64/hw/fingerprint.goodix_fod.so) name the
+module without a variant suffix, so the HAL never opens it and the first
+createSession() dereferences a null device.
+
+Fall back to dlopen()ing <id>.<class>.so from odm and vendor and resolving
+HAL_MODULE_INFO_SYM, mirroring what libhardware does after a match.
+---
+ aidl/fingerprint/Fingerprint.cpp | 24 ++++++++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/aidl/fingerprint/Fingerprint.cpp b/aidl/fingerprint/Fingerprint.cpp
+index cf98a29..f699495 100644
+--- a/aidl/fingerprint/Fingerprint.cpp
++++ b/aidl/fingerprint/Fingerprint.cpp
+@@ -7,6 +7,8 @@
+ 
+ #include "Fingerprint.h"
+ 
++#include <dlfcn.h>
++
+ #include <android-base/properties.h>
+ #include <fingerprint.sysprop.h>
+ #include "util/Util.h"
+@@ -136,8 +138,26 @@ fingerprint_device_t* Fingerprint::openFingerprintHal(const char* class_name,
+ 
+     ALOGD("Opening fingerprint hal library...");
+     if (hw_get_module_by_class(module_id, class_name, &hw_mdl) != 0) {
+-        ALOGE("Can't open fingerprint HW Module");
+-        return nullptr;
++        // Some stock blobs ship <module_id>.<class>.so without a variant
++        // suffix, which hw_get_module_by_class never probes.
++        for (const char* dir : {"/odm/lib64/hw", "/vendor/lib64/hw"}) {
++            std::string path = std::string(dir) + "/" + module_id + "." + class_name + ".so";
++            void* handle = dlopen(path.c_str(), RTLD_NOW);
++            if (!handle) continue;
++            auto hmi = static_cast<hw_module_t*>(dlsym(handle, HAL_MODULE_INFO_SYM_AS_STR));
++            if (!hmi) {
++                dlclose(handle);
++                continue;
++            }
++            hmi->dso = handle;
++            hw_mdl = hmi;
++            ALOGI("Loaded fingerprint HAL directly from %s", path.c_str());
++            break;
++        }
++        if (!hw_mdl) {
++            ALOGE("Can't open fingerprint HW Module");
++            return nullptr;
++        }
+     }
+ 
+     if (!hw_mdl) {

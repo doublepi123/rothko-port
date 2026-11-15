@@ -14,7 +14,7 @@ included; you extract them yourself from official firmware (see
 | `android_device_xiaomi_rothko/` | `device/xiaomi/rothko` | Board/product config, sepolicy, overlays, vibrator alias service, recovery runtime |
 | `android_vendor_xiaomi_rothko/` | `vendor/xiaomi/rothko` | Scripts and manifests that stage the stock prebuilt images (images not included) |
 | `patches/android_*/` | forks of the matching Lineage/AOSP repos | `git format-patch` series on top of the base commit in `patches/BASES.tsv` |
-| `mfp-daemon-rs/` | `/vendor/bin/hw/mfp-daemon` | Rust fingerprint AIDL HAL, fork of hoshikv/mfp-daemon-rs (branch `rothko`) |
+| `mfp-daemon-rs/` | (superseded) | Earlier Rust fingerprint HAL, fork of hoshikv/mfp-daemon-rs (branch `rothko`) |
 | `rothko-image-tools/` | host tools | In-place EROFS file replacement with AVB/FEC re-signing |
 | `local_manifests/rothko.xml` | `.repo/local_manifests/` | Template that pulls the forks once they are published |
 | `PORTING-NOTES.md` | | Root causes and fixes for voice wake, vibration and fingerprint |
