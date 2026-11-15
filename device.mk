@@ -11,10 +11,6 @@
 
 include device/xiaomi/rothko/config/product-parameters.mk
 
-# Static device overlay: rothko-only opt-in for the UDFPS READY ordering. The overlay sets
-# config_udfpsDeferUiReadyUntilFrameCommit=true; the platform default remains false.
-DEVICE_PACKAGE_OVERLAYS += device/xiaomi/rothko/overlay
-
 # The stock vendor compatibility matrix requires vendor-ndk 34. Keep the
 # matching snapshot instead of substituting current-platform library ABIs.
 PRODUCT_EXTRA_VNDK_VERSIONS += 34
