@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SPDX-License-Identifier: Apache-2.0
+
+    Same-device OS3.0.308.0.WNNCNXM DevicesAndroidOverlay geometry, in physical pixels.
+    Keep px: the stock product density is 520, while this build uses 480. A density
+    conversion would change panel geometry. DisplayCutout/RoundedCorners perform
+    the platform's physical-display-mode scaling.
+-->
+<resources>
+    <dimen name="rounded_corner_radius">105px</dimen>
+    <dimen name="rounded_corner_radius_top">105px</dimen>
+    <dimen name="rounded_corner_radius_bottom">105px</dimen>
+
+    <!-- SystemBarUtils consumes default; legacy portrait/landscape aliases consume portrait. -->
+    <dimen name="status_bar_height_default">138px</dimen>
+    <dimen name="status_bar_height_portrait">138px</dimen>
+
+    <!-- Stock top-center exclusion path; no @dp marker and no display masking. -->
+    <string name="config_mainBuiltInDisplayCutout" translatable="false">M 0,0 H -30 V 138 H 30 V 0 H 0 Z</string>
+    <string name="config_dozeComponent" translatable="false">com.android.systemui/com.android.systemui.doze.DozeService</string>
+    <bool name="config_dozeAlwaysOnDisplayAvailable">true</bool>
+    <bool name="config_screen_off_udfps_enabled">true</bool>
+    <item name="config_screenBrightnessDozeFloat" format="float" type="dimen">-2</item>
+</resources>

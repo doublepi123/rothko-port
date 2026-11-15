@@ -1,0 +1,648 @@
+{
+  "schema": 1,
+  "comment": "Canonical, evidence-backed parameters for the Redmi K70 Ultra (rothko). Every value here must be traceable to an input listed in its evidence array. This file is the source for config/device-parameters.mk and config/product-parameters.mk; do not hand-edit the generated make fragments.",
+  "device": {
+    "codename": "rothko",
+    "model": "2407FRK8EC",
+    "market_name": "Redmi K70 Ultra",
+    "brand": "Redmi",
+    "manufacturer": "Xiaomi",
+    "platform": "mt6989",
+    "soc": "MT6989",
+    "firmware_incremental": "OS3.0.308.0.WNNCNXM",
+    "firmware_android_release": "16",
+    "firmware_build_id": "BP2A.250605.031.A3",
+    "firmware_post_build_fingerprint": "Redmi/rothko/rothko:16/BP2A.250605.031.A3/OS3.0.308.0.WNNCNXM:user/release-keys",
+    "ota_metadata_security_patch": "2026-08-01",
+    "vendor_android_release": "14",
+    "vendor_sdk": 34,
+    "vendor_build_id": "UP1A.231005.007",
+    "vendor_security_patch": "2026-02-01",
+    "vendor_fingerprint": "Redmi/rothko/rothko:14/UP1A.231005.007/OS3.0.308.0.WNNCNXM:user/release-keys",
+    "vendor_userspace_product": "hal_mgvi_64_armv82_mt6989_cn",
+    "kernel_release": "6.1.138-android14-11-g6ab8c9a86a33-ab14396278",
+    "kernel_page_size": 4096,
+    "note": "The stock init_boot build.prop labels its bootimage product as 'missi'; that is a vendor build label, not the K70 Ultra codename. fastboot product, odm_dlkm build.prop and the OTA post-build fingerprint all identify rothko/2407FRK8EC. Do not substitute 14T Pro, duchamp, vermeer or manet.",
+    "evidence": [
+      "logs/live-fastboot-readonly-20261031.json",
+      "firmware/dump/odm_dlkm/etc/build.prop",
+      "firmware/dump/ramdisks/vendor_boot/vendor_ramdisk00/prop.default",
+      "firmware/dump/ramdisks/init_boot/ramdisk/system/etc/ramdisk/build.prop",
+      "../offline-k70u/analysis/kernel/evidence.json",
+      "../offline-k70u/analysis/kernel/ikconfig",
+      "firmware/reports/inventory.json",
+      "firmware/reports/input-report.md",
+      "firmware/reports/boot-parameters.md"
+    ],
+    "vendor_api_level": 34,
+    "first_api_level": 34,
+    "framework_target_level": 8,
+    "sepolicy_version": "34.0",
+    "vndk_version": "34",
+    "mixed_baseline": true,
+    "mixed_baseline_note": "boot image is Android 16/SDK 36, but vendor/odm/dlkm and sepolicy are Android 14/SDK 34 with FCM target-level 8. Keep vendor API at 34; do not set 36."
+  },
+  "architecture": {
+    "arch": "arm64",
+    "arch_variant": "armv8-2a",
+    "cpu_abi": "arm64-v8a",
+    "cpu_abi2": "",
+    "cpu_variant": "generic",
+    "cpu_variant_runtime": "generic",
+    "second_arch": "arm",
+    "second_arch_variant": "armv8-a",
+    "second_cpu_abi": "armeabi-v7a",
+    "second_cpu_abi2": "armeabi",
+    "second_cpu_variant": "generic",
+    "second_cpu_variant_runtime": "generic",
+    "uses_64_bit_binder": true,
+    "supports_32_bit_apps": false,
+    "supports_64_bit_apps": true,
+    "zygote": "zygote64",
+    "retain_native_32_bit_variants": true,
+    "native_32_bit_status": "dependency_verification_pending_not_app_support",
+    "note": "armv8-2a is the conservative userspace baseline indicated by mgvi_64_armv82, not a maximum-ISA claim. Effective rothko vendor/ODM ABI properties and ODM ro.zygote select 64-bit apps only; generic ramdisk properties and CONFIG_COMPAT do not prove 32-bit app support. TARGET_2ND_ARCH=arm is retained independently for native dependency verification: an ELF32 Codec2 file exists, but the observed init service selects its separate -64b executable. No native ARM32 runtime support is claimed from file presence.",
+    "evidence": [
+      "firmware/dump/ramdisks/vendor_boot/vendor_ramdisk00/prop.default",
+      "firmware/dump/vendor/build.prop",
+      "firmware/dump/odm/etc/build.prop",
+      "firmware/dump/vendor/etc/init/android.hardware.media.c2@1.2-mediatek-64b.rc",
+      "device/xiaomi/rothko/config/app-abi-evidence.json",
+      "../offline-k70u/analysis/kernel/ikconfig",
+      "../offline-k70u/analysis/kernel/evidence.json"
+    ]
+  },
+  "partitions": {
+    "boot": {
+      "use": "prebuilt_stock",
+      "stock_payload_size": 67108864,
+      "stock_payload_sha256": "462fbecbc89db679a454be37dfeac1d60f47d3d82207ce8cab2b3cbee9145f9e",
+      "fixed_partition_size": 67108864,
+      "header": {
+        "magic": "ANDROID!",
+        "header_version": 4,
+        "kernel_size": 16547799,
+        "ramdisk_size": 0
+      },
+      "kernel_sha256": "81222f824cc59fc06dba2914ba0a1ea38b11beb9ab5891c8f74c551487f48b76",
+      "source": "../offline-k70u/images/boot.img",
+      "note": "Stock boot header v4 has no ramdisk; the generic ramdisk is in init_boot. Keep the stock kernel and its AVB footer unchanged.",
+      "evidence": [
+        "logs/parent-manifest-expectations.json",
+        "logs/live-fastboot-readonly-20261031.json",
+        "../offline-k70u/unpacked/boot.json",
+        "../offline-k70u/analysis/kernel/evidence.json"
+      ]
+    },
+    "init_boot": {
+      "use": "prebuilt_stock",
+      "stock_payload_size": 8388608,
+      "stock_payload_sha256": "b7acb150c417af59506ccaa7770684b1455578f3d40589e35d7057c93cac2507",
+      "fixed_partition_size": 8388608,
+      "header": {
+        "magic": "ANDROID!",
+        "header_version": 4,
+        "kernel_size": 0,
+        "ramdisk_size": 3132722
+      },
+      "stock_ramdisk_sha256": "258932392bd2aee46943931dbecf74950b0e32790c2903c2aa67fdfa3aa2e23e",
+      "source": "../offline-k70u/images/init_boot.img",
+      "note": "Stock init_boot is retained byte-for-byte. The exact supported flag is BOARD_PREBUILT_INIT_BOOT_IMAGE (verified in build/make/core/board_config.mk and Makefile); Lineage no longer builds a generic ramdisk here. The stock generic ramdisk init/overlay compatibility is a real risk and must be checked on a later build/boot baseline.",
+      "evidence": [
+        "logs/parent-manifest-expectations.json",
+        "logs/live-fastboot-readonly-20261031.json",
+        "../offline-k70u/unpacked/init_boot.json",
+        "firmware/reports/ramdisk_inventory.json"
+      ],
+      "prebuilt_provider": "vendor/xiaomi/rothko/prebuilt/init_boot.img",
+      "compatibility_risk": "stock generic ramdisk init/overlay behavior is not yet verified"
+    },
+    "vendor_boot": {
+      "use": "prebuilt_stock",
+      "stock_payload_size": 67108864,
+      "stock_payload_sha256": "b0028698bbe0eb5696dd4af22b9ca575708199f69ce96f240fc64503273a9d83",
+      "fixed_partition_size": 67108864,
+      "header": {
+        "magic": "VNDRBOOT",
+        "header_version": 4,
+        "page_size": 4096,
+        "vendor_ramdisk_size": 54949411,
+        "dtb_size": 444690,
+        "cmdline": "bootopt=64S3,32N2,64N2",
+        "fragment_table": [
+          {
+            "index": 0,
+            "type": 1,
+            "type_name": "platform",
+            "name": "",
+            "size": 41030553,
+            "offset": 0
+          },
+          {
+            "index": 1,
+            "type": 2,
+            "type_name": "recovery",
+            "name": "recovery",
+            "size": 13918858,
+            "offset": 41030553
+          }
+        ]
+      },
+      "vendor_ramdisk00_sha256": "6ffbee75b469624f76b5f13e2e9a94cf9f5d16425633bc7ebb3d5176ff28734b",
+      "vendor_ramdisk01_sha256": "6d3689931bd2437c6190a966c982af3f4ece1f8b0826039b73a18d44fbc6c5c5",
+      "ramdisk_ko_count": 236,
+      "modules_load_sha256": "f4100053e86b05f68ad483d37a585750175781c6b98a757c71b2eae4486bc034",
+      "modules_load_recovery_sha256": "4ad20d35c30610cbc025c5385b374574561a558f74acc9f6d2bb723951a2429b",
+      "fstab_sha256": "b5301af99dbcd1dad17fda5544b8af3582eef9980ed808d7c6adba768133d9a0",
+      "dtb_container": {
+        "magic": "0xd7b7ab1e",
+        "entry_count": 1,
+        "total_size": 444690,
+        "fdt_size": 444626
+      },
+      "source": "../offline-k70u/images/vendor_boot.img",
+      "note": "Keep the stock platform + recovery fragments and the DTBO container wrapping the base DTB. A standalone FDT is not interchangeable with the container.",
+      "evidence": [
+        "logs/parent-manifest-expectations.json",
+        "logs/live-fastboot-readonly-20261031.json",
+        "firmware/reports/ramdisk_inventory.json",
+        "../offline-k70u/unpacked/vendor_boot.json",
+        "firmware/dump/ramdisks/vendor_boot/vendor_ramdisk00/first_stage_ramdisk/fstab.mt6989"
+      ]
+    },
+    "dtbo": {
+      "use": "prebuilt_stock",
+      "stock_payload_size": 8388608,
+      "stock_payload_sha256": "70221d0d6d28bb0f325bd1243ed7bc569298ddbd0982f5b2890cd81ade855a33",
+      "fixed_partition_size": 8388608,
+      "container": {
+        "magic": "0xd7b7ab1e",
+        "entry_count": 1,
+        "total_size": 113247,
+        "fdt_size": 113183
+      },
+      "source": "../offline-k70u/images/dtbo.img",
+      "note": "Stock dtbo container has one overlay entry; preserve it instead of regenerating overlays from another platform.",
+      "evidence": [
+        "logs/parent-manifest-expectations.json",
+        "logs/live-fastboot-readonly-20261031.json",
+        "../offline-k70u/images/dtbo.img"
+      ]
+    },
+    "vendor": {
+      "use": "prebuilt_stock",
+      "stock_payload_size": 1644716032,
+      "stock_payload_sha256": "e417733a560a5a60c0e9c1e4ddf4475a75ae49558f8c73c11dcc10795400ced3",
+      "note": "Vendor userspace is Android 14 / SDK 34; it is not rebuilt from Lineage sources. VINTF/SELinux compatibility with the Android 16 framework must be verified before enabling the build.",
+      "evidence": [
+        "logs/parent-manifest-expectations.json",
+        "firmware/receipts/extraction.json",
+        "firmware/reports/inventory.json"
+      ]
+    },
+    "odm": {
+      "use": "prebuilt_stock",
+      "stock_payload_size": 881057792,
+      "stock_payload_sha256": "7e9ae9013b9c449eae83321fefc04cd430f4941129b3a33519e166619b0653e5",
+      "evidence": [
+        "logs/parent-manifest-expectations.json",
+        "firmware/receipts/extraction.json",
+        "firmware/reports/inventory.json"
+      ]
+    },
+    "system_dlkm": {
+      "use": "prebuilt_stock",
+      "stock_payload_size": 7471104,
+      "stock_payload_sha256": "df485f93fb3b5a305b254c40337de953c0be2ca1450ec7b522c91a4dce61e9ea",
+      "note": "Stock GKI modules must match the stock kernel; do not replace with modules built against a different kernel tree.",
+      "evidence": [
+        "logs/parent-manifest-expectations.json",
+        "firmware/receipts/extraction.json",
+        "firmware/reports/inventory.json"
+      ]
+    },
+    "vendor_dlkm": {
+      "use": "prebuilt_stock",
+      "stock_payload_size": 21970944,
+      "stock_payload_sha256": "c050e3f48404c4637baa5bcd39c1620c638eb7e2de4c69c703965959147de942",
+      "evidence": [
+        "logs/parent-manifest-expectations.json",
+        "firmware/receipts/extraction.json",
+        "firmware/reports/inventory.json"
+      ]
+    },
+    "odm_dlkm": {
+      "use": "prebuilt_stock",
+      "stock_payload_size": 348160,
+      "stock_payload_sha256": "fc59d5085c32bbfa950481c7c9e7484c7dffa05716e4714b483341a7c34aac48",
+      "evidence": [
+        "logs/parent-manifest-expectations.json",
+        "firmware/receipts/unpack.json",
+        "firmware/dump/odm_dlkm/etc/build.prop",
+        "firmware/receipts/extraction.json",
+        "firmware/reports/inventory.json"
+      ]
+    },
+    "system_ext": {
+      "use": "built_by_lineage",
+      "stock_payload_size": 936304640,
+      "stock_payload_sha256": "743f8a9ac9e932c15454afc7d96fcba83c584ebe161830c2c5b60d553fd8256d",
+      "evidence": [
+        "logs/parent-manifest-expectations.json"
+      ]
+    },
+    "system": {
+      "use": "built_by_lineage",
+      "stock_payload_size": 880361472,
+      "stock_payload_sha256": "aba303d44e6acbeea073739afebfa6c9950ee5cef40af721ea669c08e985e0ba",
+      "evidence": [
+        "logs/parent-manifest-expectations.json"
+      ]
+    },
+    "product": {
+      "use": "built_by_lineage",
+      "stock_payload_size": 4464340992,
+      "stock_payload_sha256": "6f1d3f42592b14d32282acbb79f4ca9f4f8d3d6e4ae5ab78dbee83ca04dba470",
+      "evidence": [
+        "logs/parent-manifest-expectations.json"
+      ]
+    },
+    "mi_ext": {
+      "use": "inspected_no_native_driver_evidence",
+      "stock_payload_size": 126640128,
+      "stock_payload_sha256": "d601de14ce56da97f71766246699f32ec80d43c9c078b3d073bd95c6770182a7",
+      "note": "Checked: 5 APK, 1 JAR, 0 native .so/ELF, 0 VINTF, 10 Taiyi assets (124464825 bytes). Existing references are HyperOS framework/overlay content, not identified hardware drivers. Target does not mount mi_ext; phone partition is preserved. This does not prove that all Android functionality is independent of mi_ext.",
+      "evidence": [
+        "logs/parent-manifest-expectations.json",
+        "firmware/dump/ramdisks/vendor_boot/vendor_ramdisk00/first_stage_ramdisk/fstab.mt6989",
+        "firmware/extra/mi_ext/reports/mi_ext-content.md",
+        "firmware/extra/mi_ext/reports/mi_ext-content.json"
+      ],
+      "target_mount": false,
+      "partition_preserved": true,
+      "status": "checked_no_native_driver_evidence",
+      "native_driver_evidence": false,
+      "native_so": 0,
+      "native_elf32": 0,
+      "native_elf64": 0,
+      "vintf_xml": 0,
+      "apk_count": 5,
+      "jar_count": 1,
+      "taiyi_assets": 10,
+      "taiyi_bytes": 124464825,
+      "report": "firmware/extra/mi_ext/reports/mi_ext-content.md",
+      "report_sha256": "3b39ace8a75411cd3ad7927ed1b574fbc0ea64e786c5fe1aa3771af0263db1cc",
+      "report_json": "firmware/extra/mi_ext/reports/mi_ext-content.json",
+      "report_json_sha256": "2c6985b474dd6eb7fc005c3b621389faecbe11a2c06327c941c1c13ea91b5bf8"
+    }
+  },
+  "super": {
+    "live_size": 9663676416,
+    "live_size_hex": "0x240000000",
+    "ota_group": {
+      "name": "main",
+      "size": 9653190656,
+      "partitions": [
+        "odm",
+        "odm_dlkm",
+        "product",
+        "system",
+        "system_dlkm",
+        "system_ext",
+        "vendor",
+        "vendor_dlkm",
+        "mi_ext"
+      ]
+    },
+    "sum_ota_partition_sizes": 8963211264,
+    "ota_group_slack": 689979392,
+    "super_group_gap": 10485760,
+    "layout_source": "OTA payload metadata target layout; not a readback of current live super metadata or snapshot state",
+    "note": "The live fastboot super size is 0x240000000 (9663676416). The payload group main is 9653190656; the 10485760-byte gap is not evidence of a live metadata layout. Re-check live metadata before any future flash/OTA plan.",
+    "evidence": [
+      "logs/parent-dynamic-partition-metadata.json",
+      "logs/parent-manifest-expectations.json",
+      "logs/live-fastboot-readonly-20261031.json"
+    ],
+    "build_target_partitions": [
+      "odm",
+      "odm_dlkm",
+      "product",
+      "system",
+      "system_dlkm",
+      "system_ext",
+      "vendor",
+      "vendor_dlkm"
+    ],
+    "target_partition_sum": 8836571136,
+    "target_group_slack": 816619520
+  },
+  "virtual_ab": {
+    "snapshot_enabled": true,
+    "vabc_enabled": true,
+    "compression": "gz",
+    "cow_version": 2,
+    "compression_factor": 4096,
+    "note": "Values come from the OTA payload metadata. They are not a statement about the current snapshot/merge state.",
+    "evidence": [
+      "logs/parent-dynamic-partition-metadata.json"
+    ]
+  },
+  "slot_state": {
+    "current_slot": "a",
+    "slot_count": 2,
+    "slot_successful": {
+      "a": true,
+      "b": false
+    },
+    "slot_unbootable": {
+      "a": false,
+      "b": true
+    },
+    "retry_count": {
+      "a": 1,
+      "b": 0
+    },
+    "anti": "1",
+    "version_bootloader": "rothko_a4c8ac367_202609240408",
+    "policy": "Read-only state record only. This phase must not write, flash, erase, reboot or switch slots; slot b is marked unbootable and slot a is the only successful slot.",
+    "evidence": [
+      "logs/live-fastboot-readonly-20261031.json"
+    ]
+  },
+  "kernel": {
+    "release": "6.1.138-android14-11-g6ab8c9a86a33-ab14396278",
+    "page_size": 4096,
+    "compression": "lz4-legacy",
+    "image_sha256": "81222f824cc59fc06dba2914ba0a1ea38b11beb9ab5891c8f74c551487f48b76",
+    "module_signing": "stock kernel CONFIG_MODULE_SIG=y, CONFIG_MODULE_SIG_SHA1=y, force not set",
+    "note": "Stock kernel and modules are kept matched. The kernel is based on Android 14 sources while the Lineage framework is Android 16; known kernel/vendor CVEs remain and are not fixed by this device tree.",
+    "evidence": [
+      "../offline-k70u/analysis/kernel/ikconfig",
+      "../offline-k70u/analysis/kernel/evidence.json"
+    ]
+  },
+  "build_plan": {
+    "built_by_lineage": [
+      "system",
+      "system_ext",
+      "product"
+    ],
+    "stock_prebuilt": [
+      "boot",
+      "init_boot",
+      "vendor_boot",
+      "dtbo",
+      "vendor",
+      "odm",
+      "system_dlkm",
+      "vendor_dlkm",
+      "odm_dlkm"
+    ],
+    "ota_partitions": [
+      "boot",
+      "init_boot",
+      "vendor_boot",
+      "dtbo",
+      "vbmeta",
+      "vbmeta_system",
+      "vbmeta_vendor",
+      "odm",
+      "odm_dlkm",
+      "product",
+      "system",
+      "system_dlkm",
+      "system_ext",
+      "vendor",
+      "vendor_dlkm"
+    ],
+    "avb": {
+      "enabled": false,
+      "reason": "The OEM private AVB keys are not available. Do not re-sign with test keys, do not claim we can sign stock images, and do not present generated images as flashable.",
+      "outputs_flashable": false,
+      "scope": "Offline build signing only; does not disable, alter or claim the phone AVB state.",
+      "device_avb_touched": false
+    },
+    "ota": {
+      "generated": false,
+      "reason": "Phase 1 produces no flashable OTA and no flash script."
+    },
+    "mi_ext": {
+      "status": "checked_no_native_driver_evidence",
+      "build_hook": "none",
+      "target_mount": false,
+      "partition_preserved": true,
+      "native_driver_evidence": false,
+      "report": "firmware/extra/mi_ext/reports/mi_ext-content.md",
+      "report_sha256": "3b39ace8a75411cd3ad7927ed1b574fbc0ea64e786c5fe1aa3771af0263db1cc",
+      "reason": "Content checked; no native driver/VINTF evidence. Target does not mount mi_ext; phone partition preserved. Do not assert all Android functionality is independent of mi_ext.",
+      "userdebug_note": "A userdebug device build with prebuilt boot/init_boot/vendor_boot does not automatically adapt the mi_ext overlay. Target does not mount mi_ext; release readiness remains false."
+    },
+    "shipping_api_level": 34,
+    "note": "shipping API 34 is directly recorded as ro.product.first_api_level=34 in vendor/build.prop and the vendor ramdisk props. It matches the Android 14 / SDK 34 vendor base and is not copied from another MT6897 device.",
+    "shipping_api_evidence": "firmware/reports/inventory.json build_props: ro.product.first_api_level=34 in vendor/build.prop and vendor_ramdisk00/01 prop.default",
+    "vendor_api_level": 34,
+    "init_boot": {
+      "mode": "prebuilt_stock",
+      "flag": "BOARD_PREBUILT_INIT_BOOT_IMAGE",
+      "source": "../offline-k70u/images/init_boot.img",
+      "sha256": "b7acb150c417af59506ccaa7770684b1455578f3d40589e35d7057c93cac2507",
+      "risk": "The stock generic ramdisk keeps stock init/overlay behavior; init/overlay compatibility with the Lineage framework is not yet verified. Do not replace with a Lineage-built generic ramdisk in phase 1."
+    },
+    "build_target_partitions": [
+      "odm",
+      "odm_dlkm",
+      "product",
+      "system",
+      "system_dlkm",
+      "system_ext",
+      "vendor",
+      "vendor_dlkm"
+    ],
+    "target_mount_mi_ext": false,
+    "stock_only_checked_no_native_driver": [
+      "mi_ext"
+    ]
+  },
+  "gates": {
+    "required_before_build": [
+      "staged prebuilt boot/init_boot/vendor_boot/dtbo and stock vendor/odm/dlkm images (9 total; mi_ext excluded)",
+      "config/vendor-inventory.json with verified VINTF manifest/matrix and checkvintf result",
+      "config/vendor-inventory.json with enforcing SELinux policy hash and neverallow result",
+      "verified HAL inventory and kernel module match",
+      "mi_ext content check completed: no native driver/VINTF evidence; target not mounted; partition preserved; do not infer all Android functionality is independent",
+      "build-baseline VNDK 34 and linker namespace evidence; resolve 38 framework-provided candidates and 8 graphics/common/memtrack-tagged dependencies without assuming system_ext",
+      "checkvintf compatibility result",
+      "SELinux neverallow result",
+      "module ABI/CRC evidence; runtime module load is a separate boot-test gate",
+      "stock init_boot generic ramdisk init/overlay compatibility check",
+      "vendor contract BoardConfigVendor.mk/rothko-vendor.mk and ROTHKO_HARDWARE_RELEASE_READY=false"
+    ],
+    "forbidden": [
+      "ALLOW_MISSING_DEPENDENCIES",
+      "disabling VINTF enforcement",
+      "global SELinux permissive",
+      "empty VINTF manifest",
+      "test-key AVB signing presented as stock signing",
+      "writing or switching slots on the live device",
+      "setting vendor API level 36 while the vendor stack is SDK 34 / FCM target-level 8",
+      "assuming system_ext resolves the 38 pending framework candidates or the 8 graphics/common/memtrack-tagged dependencies"
+    ],
+    "forbidden_code_patterns": [
+      "ALLOW_MISSING_DEPENDENCIES",
+      "SELINUX_IGNORE_NEVERALLOWS",
+      "PRODUCT_ENFORCE_VINTF_MANIFEST := false",
+      "androidboot.selinux=permissive",
+      "testkey_rsa"
+    ],
+    "forbidden_script_commands": [
+      "fastboot",
+      "adb",
+      "reboot",
+      "set_active"
+    ]
+  },
+  "vendor_integration": {
+    "vendor_api_level": 34,
+    "first_api_level": 34,
+    "framework_target_level": 8,
+    "sepolicy_version": "34.0",
+    "vndk_version": "34",
+    "vintf_manifest_matrix_files": 96,
+    "vintf_hal_names": 139,
+    "vintf_kernel_versions": [],
+    "checkvintf_result": null,
+    "selinux_policy_files": 51,
+    "precompiled_sepolicy_present": true,
+    "neverallow_result": null,
+    "linker_namespace_status": "unknown: no ld.config.txt/namespace search-path configuration was found in the acquired images",
+    "linker_config_files": 10,
+    "public_vendor_libraries": 11,
+    "vndk_artifacts": 6,
+    "hal_elf_count": 77,
+    "library_index_entries": 2555,
+    "cross_partition_dependencies": 23,
+    "pending_framework_rows": 783,
+    "pending_framework_unique_libraries": 38,
+    "missing_nonbase": 8,
+    "unknown_nonbase_unique": 7,
+    "required_extra_partitions": [],
+    "status": "incomplete: no checkvintf result, no neverallow result, 38 framework-provided candidate libraries pending baseline, 8 non-base-tagged dependencies unresolved, linker namespace unknown",
+    "claim": "not passed; do not assume system_ext resolves the framework candidates or the graphics/common/memtrack interface libraries",
+    "evidence_file": "config/vendor-integration-evidence.json",
+    "evidence": [
+      "firmware/reports/inventory.json",
+      "firmware/reports/input-report.md",
+      "firmware/reports/nonbase-gaps.tsv",
+      "firmware/reports/library-index.tsv"
+    ],
+    "required_extra_partitions_note": "Empty only because unresolved framework candidates are pending baseline; not a claim that system_ext covers them.",
+    "pending_framework_candidate_libraries": 38,
+    "missing_nonbase_unique_libraries": [
+      "android.hardware.memtrack-V1-ndk.so",
+      "android.hardware.graphics.common-V4-ndk.so",
+      "android.hardware.graphics.common@1.2.so",
+      "android.hardware.graphics.allocator-V2-ndk.so",
+      "android.hardware.common-V2-ndk.so",
+      "android.hardware.graphics.allocator@4.0.so",
+      "android.hardware.graphics.mapper@4.0.so"
+    ],
+    "missing_nonbase_note": "Mostly Android graphics/common/memtrack standard interface libraries; not evidence they are system_ext non-base libraries.",
+    "hals_with_file_candidates": 76,
+    "hals_with_framework_candidates": 77,
+    "linked_success_claimed": false,
+    "vndk_compatibility": {
+      "vndk_version": "34",
+      "status": "pending_build_baseline_products",
+      "note": "Final VNDK 34 compatibility requires build-baseline system/system_ext/product artifacts and linker/namespace checks."
+    },
+    "lib64_hw_false_gaps_corrected": true
+  },
+  "module_compatibility": {
+    "boot_kernel_release": "6.1.138-android14-11-g6ab8c9a86a33-ab14396278",
+    "config_modversions": true,
+    "config_module_sig": true,
+    "config_module_sig_force": false,
+    "config_module_sig_protect": true,
+    "config_module_sig_hash": "sha1",
+    "gki_hidden_configs_present": true,
+    "system_dlkm_module_count": 60,
+    "system_dlkm_vermagic": "6.1.138-android14-11-g6ab8c9a86a33-ab14396278 SMP preempt mod_unload modversions aarch64",
+    "vendor_dlkm_module_count": 268,
+    "vendor_dlkm_vermagic": "6.1.138-android14-11-ga418eeb69cb6 SMP preempt mod_unload modversions aarch64",
+    "vendor_boot_module_count": 236,
+    "vendor_boot_vermagic": "6.1.138-android14-11-ga418eeb69cb6 SMP preempt mod_unload modversions aarch64",
+    "system_dlkm_signed_modules": 60,
+    "vendor_dlkm_signed_modules": 0,
+    "vendor_boot_signed_modules": 0,
+    "crc_cross_check": {
+      "system_dlkm_symbols": 1187,
+      "system_dlkm_conflicting_crcs": 0,
+      "vendor_dlkm_overlap_symbols": 522,
+      "vendor_dlkm_overlap_occurrences": 8797,
+      "vendor_dlkm_mismatches": 0,
+      "vendor_boot_overlap_symbols": 424,
+      "vendor_boot_overlap_occurrences": 5729,
+      "vendor_boot_mismatches": 0
+    },
+    "kernel_symbol_crc_table_available": null,
+    "runtime_load_verified": false,
+    "status": "same_magic_suffix_match_crc_overlap_consistent_module_layout_match_kernel_crcs_unverified_runtime_unproven",
+    "note": "same_magic(has_crcs) ignores the release prefix; all modules have __versions and module_layout CRC 0xea759d7f. Kernel symbol CRCs and runtime load remain unverified. Do not set vermagic string equality as a gate.",
+    "evidence_file": "config/module-compatibility.json",
+    "evidence": [
+      "../offline-k70u/analysis/kernel/ikconfig",
+      "../offline-k70u/analysis/kernel/evidence.json",
+      "firmware/reports/module-vermagic.tsv",
+      "firmware/reports/boot-parameters.md"
+    ],
+    "vendor_dlkm_crc_symbols": 3688,
+    "vendor_boot_crc_symbols": 2740,
+    "same_magic": {
+      "release_prefix_ignored_with_crcs": true,
+      "crc_section_present_modules": 564,
+      "vermagic_suffix": "SMP preempt mod_unload modversions aarch64",
+      "vermagic_suffix_variants": 1,
+      "module_layout_crc": "0xea759d7f",
+      "module_layout_crc_mismatches": 0,
+      "note": "The git hash difference alone is not a rejection reason when __versions is present."
+    },
+    "kernel_symbol_crc_table_status": "not located in stripped Image.elf; __kcrctab may be present, absence not claimed"
+  },
+  "prebuilt_integrity": {
+    "required": [
+      "boot",
+      "init_boot",
+      "vendor_boot",
+      "dtbo",
+      "vendor",
+      "odm",
+      "system_dlkm",
+      "vendor_dlkm",
+      "odm_dlkm"
+    ],
+    "verified_against": "logs/parent-manifest-expectations.json",
+    "source_receipt": "firmware/receipts/extraction.json",
+    "source_receipt_all_verified": true,
+    "mi_ext_state": "checked_no_native_driver_evidence; not staged; target not mounted; phone partition preserved",
+    "note": "The vendor lane owns staging and the BOARD_PREBUILT_* flags. The device include is vendor/xiaomi/rothko/BoardConfigVendor.mk. The vendor gate keeps ROTHKO_HARDWARE_RELEASE_READY=false; a staged hash is not a compatibility or bootability claim.",
+    "provider": "vendor/xiaomi/rothko",
+    "prebuilt_dir": "vendor/xiaomi/rothko/prebuilt",
+    "staged_manifest": "vendor/xiaomi/rothko/prebuilt/staged-manifest.json",
+    "hardware_release_ready": false,
+    "startup_sources_verified": true
+  },
+  "release_readiness": {
+    "ready": false,
+    "unknowns": [
+      "live snapshot/merge state",
+      "module runtime load and kernel symbol CRC compatibility",
+      "VINTF checkvintf and SELinux neverallow results",
+      "VNDK 34 compatibility against build-baseline products",
+      "actual dumpvars, final-image app ABI properties and selected zygote64 startup script consistency",
+      "native ARM32 runtime dependency/provider and namespace closure; secondary build architecture is not app support",
+      "mi_ext runtime necessity/overlay adaptation unproven; content checked with no native driver evidence"
+    ],
+    "note": "Compilation gates may be open for configuration and systemimage; this does not make the device release-ready."
+  }
+}

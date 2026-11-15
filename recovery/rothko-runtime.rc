@@ -1,0 +1,7 @@
+# Device-specific recovery-only integration contract. Merge only through the
+# reviewed Recovery packer; never replace the normal init configuration.
+service recovery /system/recovery-runtime/bin/recovery-launcher
+    socket recovery stream 422 system system
+    socket rothko_recovery_normal stream 0600 shell shell
+    seclabel u:r:recovery:s0
+    user root

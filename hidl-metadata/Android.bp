@@ -1,0 +1,24 @@
+// SPDX-FileCopyrightText: The LineageOS Project
+// SPDX-License-Identifier: Apache-2.0
+//
+// HIDL metadata declaration for the prebuilt MediaTek AEE vendor service.
+//
+// The stock vendor image ships vendor.mediatek.hardware.aee@1.1-service, whose
+// init rc declares both the 1.1 and 1.0 IAee interfaces (the 1.1 library also
+// needs the 1.0 library at runtime). The HIDL package source is not present in
+// this checkout, so this module only publishes the two fully-qualified
+// interface names to host_init_verifier through the
+// prebuilt_hidl_interfaces metadata provider.
+//
+// Scope: source-level metadata declaration only. It does not build or install
+// a HAL, and it does not prove the native producer graph, runtime behaviour, or
+// inheritance relationships (prebuilt_hidl_interfaces explicitly does not
+// validate inheritance).
+
+prebuilt_hidl_interfaces {
+    name: "hidl_vendor_mediatek_hardware_aee_interface",
+    interfaces: [
+        "vendor.mediatek.hardware.aee@1.0::IAee",
+        "vendor.mediatek.hardware.aee@1.1::IAee",
+    ],
+}

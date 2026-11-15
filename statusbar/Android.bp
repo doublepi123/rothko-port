@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: Apache-2.0
+// Rothko-only same-stock geometry. Resource-only RROs, not framework-res source overlays.
+runtime_resource_overlay {
+    name: "RothkoStatusBarFrameworkOverlay",
+    manifest: "FrameworkOverlay/AndroidManifest.xml",
+    resource_dirs: ["FrameworkOverlay/res"],
+    certificate: "platform",
+    system_ext_specific: true,
+}
+
+runtime_resource_overlay {
+    name: "RothkoStatusBarSystemUIOverlay",
+    manifest: "SystemUIOverlay/AndroidManifest.xml",
+    resource_dirs: ["SystemUIOverlay/res"],
+    certificate: "platform",
+    system_ext_specific: true,
+}

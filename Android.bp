@@ -1,0 +1,22 @@
+// SPDX-FileCopyrightText: The LineageOS Project
+// SPDX-License-Identifier: Apache-2.0
+//
+// rothko framework compatibility matrix fragment.
+//
+// This is a PARTIAL compatibility contract: an evidence-frozen subset of the
+// 24 HAL instances observed in the stock vendor/odm manifests, grouped into 19
+// HAL groups. It is not a complete description of device compatibility, and
+// the runtime behaviour of every listed provider is unverified.
+//
+// The source XML in config/ is a byte-exact copy of the reviewed candidate.
+// Its SHA-256 is frozen by tests/test_vintf_matrix.py; do not add instances,
+// optional or regex entries, or widen versions, and do not merge the Lineage
+// framework compatibility matrix into it.
+vintf_compatibility_matrix {
+    name: "rothko_framework_compatibility_matrix",
+    stem: "compatibility_matrix.rothko.xml",
+    product_specific: true,
+    srcs: [
+        "config/compatibility_matrix.rothko.xml",
+    ],
+}

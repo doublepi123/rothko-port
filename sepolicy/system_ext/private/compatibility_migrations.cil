@@ -1,0 +1,14 @@
+(optional hal_face_default
+  (allow hal_face_default virtual_face_prop (file (read getattr map open)))
+  (allow hal_face_default virtual_face_prop (property_service (set))))
+
+(optional hal_fingerprint_default
+  (allow hal_fingerprint_default virtual_fingerprint_prop (file (read getattr map open)))
+  (allow hal_fingerprint_default virtual_fingerprint_prop (property_service (set))))
+
+(dontaudit kcmdlinectrl virtual_face_prop (file (read)))
+(dontaudit misctrl virtual_face_prop (file (read)))
+(dontaudit mtectrl virtual_face_prop (file (read)))
+(dontaudit kcmdlinectrl virtual_fingerprint_prop (file (read)))
+(dontaudit misctrl virtual_fingerprint_prop (file (read)))
+(dontaudit mtectrl virtual_fingerprint_prop (file (read)))

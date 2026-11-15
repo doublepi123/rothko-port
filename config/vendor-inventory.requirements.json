@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "description": "Required shape of config/vendor-inventory.json. This file is a requirements list, not a VINTF manifest and not a completed inventory. Every value must come from an actual check or extraction.",
+  "paths_relative_to": "the rothko device root, or absolute",
+  "required": {
+    "device": "rothko",
+    "source_firmware": "OS3.0.308.0.WNNCNXM",
+    "images": {
+      "vendor": [
+        "path",
+        "size",
+        "sha256"
+      ],
+      "odm": [
+        "path",
+        "size",
+        "sha256"
+      ],
+      "system_dlkm": [
+        "path",
+        "size",
+        "sha256"
+      ],
+      "vendor_dlkm": [
+        "path",
+        "size",
+        "sha256"
+      ],
+      "odm_dlkm": [
+        "path",
+        "size",
+        "sha256"
+      ]
+    },
+    "vintf": {
+      "vendor_manifest": [
+        "path",
+        "sha256"
+      ],
+      "vendor_matrix": [
+        "path",
+        "sha256"
+      ],
+      "framework_matrix": [
+        "path",
+        "sha256"
+      ],
+      "check": {
+        "tool": "checkvintf or equivalent",
+        "result": "compatible",
+        "log": "path"
+      }
+    },
+    "selinux": {
+      "mode": "enforcing",
+      "vendor_policy_sha256": "sha256",
+      "neverallow": {
+        "result": "pass",
+        "log": "path"
+      }
+    },
+    "hal_inventory": {
+      "verified": true,
+      "source": "path"
+    },
+    "kernel_modules": {
+      "verified": true,
+      "source": "path",
+      "verified_scope": "MODVERSIONS __versions CRC cross-check; runtime module load not verified"
+    },
+    "shipping_api_level": 34,
+    "mi_ext_integration": {
+      "implemented": true,
+      "build_hook": "name of the reviewed integration",
+      "mechanism": "description"
+    },
+    "vendor_api_level": 34,
+    "framework_target_level": 8,
+    "sepolicy_version": "34.0",
+    "vndk_version": "34",
+    "hal_elf": {
+      "pending_framework_unique_libraries": 0,
+      "missing_nonbase": 0,
+      "namespace_status": "known/reachable from the build baseline/linker configuration (not unknown)",
+      "linked_success_verified": true
+    }
+  },
+  "notes": [
+    "The raw files under firmware/reports/inventory.json include extracted VINTF and SELinux artifacts, but no checkvintf result and no neverallow result. They do not by themselves satisfy this requirements file.",
+    "Do not fill result=compatible or neverallow.result=pass without running the corresponding check.",
+    "mi_ext is checked with no native driver evidence and is not a vendor-inventory image requirement; the phone partition must not be deleted.",
+    "mi_ext is outside vendor inventory and phase-1 target mounting: checked with no native driver evidence, not staged, phone partition preserved; never delete it."
+  ]
+}

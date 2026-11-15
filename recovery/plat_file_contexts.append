@@ -1,0 +1,2 @@
+/dev/socket/rothko_recovery_normal u:object_r:recovery_socket:s0
+/system/bin/fastbootd u:object_r:rootfs:s0

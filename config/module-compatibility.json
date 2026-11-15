@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "description": "Kernel/module compatibility evidence for the stock rothko kernel and its stock module sets. This does not claim a runtime module load or boot test.",
+  "sources": {
+    "ikconfig": {
+      "path": "../offline-k70u/analysis/kernel/ikconfig",
+      "sha256": "063823a9cb8763c1162f15a175523c23185ce283f7c6df3d93bf2a890a8436f3"
+    },
+    "kernel_evidence": {
+      "path": "../offline-k70u/analysis/kernel/evidence.json",
+      "sha256": "5463299ef15a923cc319836038d459b24cd93d072baf24a119d34d0106142370"
+    },
+    "module_vermagic": {
+      "path": "firmware/reports/module-vermagic.tsv",
+      "sha256": "48a200b171a2e714fc72ce159eeb24805b0630a925ab0d68c16650acd0e41529"
+    },
+    "boot_parameters": {
+      "path": "firmware/reports/boot-parameters.md",
+      "sha256": "d7c632239f3b36fdc08c5de8b3e80797cffe54b72e67a4a9a6e573fceffee974"
+    },
+    "kernel_module_version_reference": {
+      "path": "logs/kernel-module-version-reference.c",
+      "sha256": "59e095d2e241f81f9148ace8e62a557376ec74f904a349f27aa1504737165ac0"
+    }
+  },
+  "boot_kernel_release": "6.1.138-android14-11-g6ab8c9a86a33-ab14396278",
+  "kernel_config": {
+    "CONFIG_MODVERSIONS": "y",
+    "CONFIG_MODULE_SIG": "y",
+    "CONFIG_MODULE_SIG_FORCE": "not set",
+    "CONFIG_MODULE_SIG_PROTECT": "y",
+    "CONFIG_MODULE_SIG_ALL": "y",
+    "CONFIG_MODULE_SIG_HASH": "sha1",
+    "CONFIG_GKI_HIDDEN_*": "present",
+    "CONFIG_CFI_CLANG": "y",
+    "CONFIG_LTO_NONE": "y",
+    "CONFIG_ARM64_4K_PAGES": "y"
+  },
+  "module_sets": {
+    "system_dlkm": {
+      "module_count": 60,
+      "vermagic": "6.1.138-android14-11-g6ab8c9a86a33-ab14396278 SMP preempt mod_unload modversions aarch64",
+      "vermagic_matches_boot_release": true,
+      "signed_modules": 60,
+      "unsigned_modules": 0,
+      "crc_symbols": 1187,
+      "conflicting_symbol_crcs": 0,
+      "vermagic_variants": 1
+    },
+    "vendor_dlkm": {
+      "module_count": 268,
+      "vermagic": "6.1.138-android14-11-ga418eeb69cb6 SMP preempt mod_unload modversions aarch64",
+      "vermagic_matches_boot_release": false,
+      "signed_modules": 0,
+      "unsigned_modules": 268,
+      "vermagic_variants": 1,
+      "crc_symbols": 3688,
+      "conflicting_symbol_crcs": 0
+    },
+    "vendor_boot_ramdisk00": {
+      "module_count": 236,
+      "vermagic": "6.1.138-android14-11-ga418eeb69cb6 SMP preempt mod_unload modversions aarch64",
+      "vermagic_matches_boot_release": false,
+      "signed_modules": 0,
+      "unsigned_modules": 236,
+      "vermagic_variants": 1,
+      "crc_symbols": 2740,
+      "conflicting_symbol_crcs": 0
+    }
+  },
+  "crc_cross_check": {
+    "method": "Parse __versions (struct modversion_info) from every module. Compare vendor-module symbol CRCs against the system_dlkm GKI module map, whose vermagic matches the boot kernel release.",
+    "system_dlkm_symbols": 1187,
+    "system_dlkm_conflicting_symbol_crcs": 0,
+    "vendor_dlkm_overlap_symbols": 522,
+    "vendor_dlkm_crc_mismatches": 0,
+    "vendor_boot_overlap_symbols": 424,
+    "vendor_boot_crc_mismatches": 0,
+    "vendor_dlkm_overlap_occurrences": 8797,
+    "vendor_boot_overlap_occurrences": 5729
+  },
+  "kernel_symbol_crc_table_available": null,
+  "runtime_load_verified": false,
+  "status": "same_magic_suffix_match_crc_overlap_consistent_module_layout_match_kernel_crcs_unverified_runtime_unproven",
+  "conclusion": "All 564 stock modules contain __versions, share the same vermagic suffix (SMP preempt mod_unload modversions aarch64) and the same module_layout CRC 0xea759d7f. Under same_magic(has_crcs=true) the release prefix is ignored, so the git hash difference alone is not a rejection reason. Vendor-vs-system_dlkm __versions CRC overlaps are consistent. The kernel symbol CRC table was not located in the stripped image and no runtime load was performed; compatibility remains unverified, not declared incompatible.",
+  "limitations": [
+    "The kernel __kcrctab/CRC data may be present in the stripped image but was not located; this is not a claim that it is absent.",
+    "Only module-to-GKI-module __versions CRC consistency and module_layout CRC equality are proven; per-symbol CRC comparison against the real running kernel is still required.",
+    "No module was loaded and no phone access occurred."
+  ],
+  "same_magic": {
+    "reference": "logs/kernel-module-version-reference.c",
+    "kernel_function": "same_magic(amagic, bmagic, has_crcs)",
+    "release_prefix_ignored_when_has_crcs": true,
+    "crc_section_present_modules": 564,
+    "modules_examined": 564,
+    "vermagic_suffix": "SMP preempt mod_unload modversions aarch64",
+    "vermagic_suffix_variants": 1,
+    "module_layout_crc": "0xea759d7f",
+    "module_layout_crc_modules": 564,
+    "module_layout_crc_mismatches": 0,
+    "note": "With __versions present, same_magic skips the release prefix and compares only the suffix. The git hash difference is therefore not a rejection reason."
+  },
+  "kernel_symbol_crc_table_status": "not located in the stripped Image.elf; __kcrctab may be present, so absence is not claimed"
+}
