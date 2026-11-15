@@ -1,0 +1,570 @@
+From e84a385fa04098159d0b1b62cea7926a663a7ba6 Mon Sep 17 00:00:00 2001
+From: lcy <admin@luchenyang.xyz>
+Date: Sun, 15 Nov 2026 22:37:45 +0800
+Subject: [PATCH] SystemUI: retain rothko lockscreen geometry without FOD
+ bridge
+
+Keep exactly the framework files retained in the tested services/SystemUI build. Legacy FOD services, touch plumbing and frame-commit illumination control are excluded. The unused FingerprintManager constants and default-false resource declarations remain for compatibility with the proven build; no active bridge implementation is shipped.
+
+Co-authored-by: sisyphus-dev-ai <sisyphus-dev-ai@users.noreply.github.com>
+---
+ .../fingerprint/FingerprintManager.java       |  10 +-
+ core/res/res/values/config.xml                |   2 +
+ .../DefaultIndicationAreaSectionTest.kt       |   3 +
+ .../SystemUI/res/values/lineage_config.xml    |   6 +
+ .../keyguard/KeyguardViewConfigurator.kt      |  11 +
+ .../ui/view/RothkoKeyguardGeometry.kt         | 218 ++++++++++++++++++
+ .../sections/DefaultIndicationAreaSection.kt  | 137 ++++++++++-
+ 7 files changed, 383 insertions(+), 4 deletions(-)
+ create mode 100644 packages/SystemUI/src/com/android/systemui/keyguard/ui/view/RothkoKeyguardGeometry.kt
+
+diff --git a/core/java/android/hardware/fingerprint/FingerprintManager.java b/core/java/android/hardware/fingerprint/FingerprintManager.java
+index 1932910e6..a21f9076e 100644
+--- a/core/java/android/hardware/fingerprint/FingerprintManager.java
++++ b/core/java/android/hardware/fingerprint/FingerprintManager.java
+@@ -128,10 +128,18 @@ public class FingerprintManager implements BiometricAuthenticator, BiometricFing
+      */
+     public static final int UDFPS_UI_READY = 2;
+ 
++    /** Frame-bound illumination committed; internal lifecycle event, never passed to the HAL.
++     * @hide */
++    public static final int UDFPS_UI_FOD_FRAME_COMMITTED = 0x52460001;
++    /** Illumination lifecycle revoked; internal lifecycle event, never passed to the HAL.
++     * @hide */
++    public static final int UDFPS_UI_FOD_FRAME_REVOKED = 0x52460002;
++
+     /**
+      * @hide
+      */
+-    @IntDef({UDFPS_UI_OVERLAY_SHOWN, UDFPS_UI_READY})
++    @IntDef({UDFPS_UI_OVERLAY_SHOWN, UDFPS_UI_READY,
++            UDFPS_UI_FOD_FRAME_COMMITTED, UDFPS_UI_FOD_FRAME_REVOKED})
+     @Retention(RetentionPolicy.SOURCE)
+     public @interface UdfpsUiEvent{}
+ 
+diff --git a/core/res/res/values/config.xml b/core/res/res/values/config.xml
+index fbe4c3280..2df39dfc2 100644
+--- a/core/res/res/values/config.xml
++++ b/core/res/res/values/config.xml
+@@ -7757,4 +7757,6 @@
+         It can only contain non-AOSP permissions outside of the android.*
+         and com.android.* namespace. -->
+     <string-array name="config_watchFacePermissions" translatable="false"/>
++    <!-- Rothko stock FodEngine 2.0 lifecycle extension. Device overlay only. -->
++    <bool name="config_rothkoFodStateBridgeEnabled">false</bool>
+ </resources>
+diff --git a/packages/SystemUI/multivalentTests/src/com/android/systemui/keyguard/ui/view/layout/sections/DefaultIndicationAreaSectionTest.kt b/packages/SystemUI/multivalentTests/src/com/android/systemui/keyguard/ui/view/layout/sections/DefaultIndicationAreaSectionTest.kt
+index 9ceabd743..417b37feb 100644
+--- a/packages/SystemUI/multivalentTests/src/com/android/systemui/keyguard/ui/view/layout/sections/DefaultIndicationAreaSectionTest.kt
++++ b/packages/SystemUI/multivalentTests/src/com/android/systemui/keyguard/ui/view/layout/sections/DefaultIndicationAreaSectionTest.kt
+@@ -24,6 +24,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
+ import androidx.test.filters.SmallTest
+ import com.android.systemui.Flags as AConfigFlags
+ import com.android.systemui.SysuiTestCase
++import com.android.systemui.keyguard.ui.viewmodel.DeviceEntryIconViewModel
+ import com.android.systemui.keyguard.ui.viewmodel.KeyguardIndicationAreaViewModel
+ import com.android.systemui.res.R
+ import com.android.systemui.statusbar.KeyguardIndicationController
+@@ -40,6 +41,7 @@ class DefaultIndicationAreaSectionTest : SysuiTestCase() {
+ 
+     @Mock private lateinit var keyguardIndicationAreaViewModel: KeyguardIndicationAreaViewModel
+     @Mock private lateinit var indicationController: KeyguardIndicationController
++    @Mock private lateinit var deviceEntryIconViewModel: DeviceEntryIconViewModel
+ 
+     private lateinit var underTest: DefaultIndicationAreaSection
+ 
+@@ -51,6 +53,7 @@ class DefaultIndicationAreaSectionTest : SysuiTestCase() {
+                 context,
+                 keyguardIndicationAreaViewModel,
+                 indicationController,
++                { deviceEntryIconViewModel },
+             )
+     }
+ 
+diff --git a/packages/SystemUI/res/values/lineage_config.xml b/packages/SystemUI/res/values/lineage_config.xml
+index ccb178f5d..a65df1d54 100644
+--- a/packages/SystemUI/res/values/lineage_config.xml
++++ b/packages/SystemUI/res/values/lineage_config.xml
+@@ -21,6 +21,12 @@
+     <!-- Whether to enable framework dimming for UDFPS -->
+     <bool name="config_udfpsFrameworkDimming">false</bool>
+ 
++    <!-- Opt-in ordering: report UDFPS_UI_READY only after the SurfaceView frame that draws the
++         illumination dot has been committed by SurfaceFlinger. The default keeps the legacy
++         "READY then draw" ordering for all other devices. Device overlays can opt in while
++         validating frame readiness; this does not establish physical panel illumination. -->
++    <bool name="config_udfpsDeferUiReadyUntilFrameCommit">false</bool>
++
+     <!-- Brightness-to-alpha lookup table (LUT) for UDFPS framework dimming.
+          Each entry is in the format <brightness>,<alpha> where:
+            - brightness = panel backlight level
+diff --git a/packages/SystemUI/src/com/android/systemui/keyguard/KeyguardViewConfigurator.kt b/packages/SystemUI/src/com/android/systemui/keyguard/KeyguardViewConfigurator.kt
+index cd890a684..ec2530f83 100644
+--- a/packages/SystemUI/src/com/android/systemui/keyguard/KeyguardViewConfigurator.kt
++++ b/packages/SystemUI/src/com/android/systemui/keyguard/KeyguardViewConfigurator.kt
+@@ -25,6 +25,7 @@ import com.android.systemui.common.ui.ConfigurationState
+ import com.android.systemui.dagger.SysUISingleton
+ import com.android.systemui.dagger.qualifiers.Main
+ import com.android.systemui.deviceentry.domain.interactor.DeviceEntryHapticsInteractor
++import com.android.systemui.dump.DumpManager
+ import com.android.systemui.keyguard.domain.interactor.KeyguardClockInteractor
+ import com.android.systemui.keyguard.ui.binder.KeyguardBlueprintViewBinder
+ import com.android.systemui.keyguard.ui.binder.KeyguardJankBinder
+@@ -32,6 +33,7 @@ import com.android.systemui.keyguard.ui.binder.KeyguardRootViewBinder
+ import com.android.systemui.keyguard.ui.binder.LightRevealScrimViewBinder
+ import com.android.systemui.keyguard.ui.view.KeyguardIndicationArea
+ import com.android.systemui.keyguard.ui.view.KeyguardRootView
++import com.android.systemui.keyguard.ui.view.RothkoKeyguardGeometry
+ import com.android.systemui.keyguard.ui.viewmodel.KeyguardBlueprintViewModel
+ import com.android.systemui.keyguard.ui.viewmodel.KeyguardClockViewModel
+ import com.android.systemui.keyguard.ui.viewmodel.KeyguardJankViewModel
+@@ -91,16 +93,25 @@ constructor(
+     @Main private val mainDispatcher: CoroutineDispatcher,
+     private val msdlPlayer: MSDLPlayer,
+     @KeyguardBlueprintLog private val blueprintLog: LogBuffer,
++    private val dumpManager: DumpManager,
+ ) : CoreStartable {
+ 
+     private var rootViewHandle: DisposableHandle? = null
+     private var jankHandle: DisposableHandle? = null
++    private var geometryDiagnostic: RothkoKeyguardGeometry? = null
+ 
+     override fun start() {
+         bindKeyguardRootView()
+         bindJankViewModel()
+         initializeViews()
+ 
++        if (geometryDiagnostic == null && RothkoKeyguardGeometry.enabled(context)) {
++            geometryDiagnostic = RothkoKeyguardGeometry().also { diagnostic ->
++                dumpManager.registerNormalDumpable(RothkoKeyguardGeometry.DUMP_NAME, diagnostic)
++                diagnostic.observe(keyguardRootView)
++            }
++        }
++
+         if (ambientAod()) {
+             LightRevealScrimViewBinder.bind(
+                 lightRevealScrim,
+diff --git a/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/RothkoKeyguardGeometry.kt b/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/RothkoKeyguardGeometry.kt
+new file mode 100644
+index 000000000..24d89c2bc
+--- /dev/null
++++ b/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/RothkoKeyguardGeometry.kt
+@@ -0,0 +1,218 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.systemui.keyguard.ui.view
++
++import android.content.Context
++import android.graphics.Rect
++import android.os.SystemClock
++import android.os.SystemProperties
++import android.view.View
++import android.view.ViewTreeObserver
++import android.widget.ImageView
++import com.android.systemui.Dumpable
++import com.android.systemui.res.R
++import com.android.systemui.util.Assert
++import java.io.PrintWriter
++
++/** Fixed-ID, scalar-only diagnostics. All View access is confined to the UI thread. */
++class RothkoKeyguardGeometry : Dumpable {
++    private val publication = RothkoKeyguardGeomPublication()
++
++    /** Installed once on the lifetime-owned keyguard root; no dump-triggered work is scheduled. */
++    fun observe(root: View) {
++        Assert.isMainThread()
++        var observer: ViewTreeObserver? = null
++        var lastSampleUptimeMs: Long? = null
++        val preDraw = ViewTreeObserver.OnPreDrawListener {
++            Assert.isMainThread()
++            val nowUptimeMs = SystemClock.uptimeMillis()
++            if (rothkoKeyguardGeomSampleDue(lastSampleUptimeMs, nowUptimeMs)) {
++                lastSampleUptimeMs = nowUptimeMs
++                publishOnMain(root, nowUptimeMs)
++            }
++            true
++        }
++        fun attach() {
++            Assert.isMainThread()
++            if (observer?.isAlive == true) return
++            observer = root.viewTreeObserver.also { it.addOnPreDrawListener(preDraw) }
++        }
++        root.addOnAttachStateChangeListener(
++            object : View.OnAttachStateChangeListener {
++                override fun onViewAttachedToWindow(v: View) = attach()
++
++                override fun onViewDetachedFromWindow(v: View) {
++                    Assert.isMainThread()
++                    observer?.takeIf { it.isAlive }?.removeOnPreDrawListener(preDraw)
++                    observer = null
++                    publication.unavailable()
++                }
++            }
++        )
++        if (root.isAttachedToWindow) attach()
++    }
++
++    private fun publishOnMain(root: View, sampleUptimeMs: Long) {
++        Assert.isMainThread()
++        val resources = root.resources
++        publication.publish(
++            RothkoKeyguardGeomSnapshot(
++                uptimeMs = sampleUptimeMs,
++                root = sample(root.findViewById(R.id.keyguard_root_view)),
++                entry = sample(root.findViewById(R.id.device_entry_icon_view)),
++                foreground = sample(root.findViewById(R.id.device_entry_icon_fg), foreground = true),
++                background = sample(root.findViewById(R.id.device_entry_icon_bg)),
++                indication = sample(root.findViewById(R.id.keyguard_indication_area)),
++                top = sample(root.findViewById(R.id.keyguard_indication_text)),
++                bottom = sample(root.findViewById(R.id.keyguard_indication_text_bottom)),
++                lockPaddingPx = resources.getDimensionPixelSize(R.dimen.lock_icon_padding),
++                bottomMarginPx = resources.getDimensionPixelSize(R.dimen.keyguard_indication_margin_bottom),
++                minTextHeightPx = resources.getDimensionPixelSize(R.dimen.keyguard_indication_text_min_height),
++            )
++        )
++    }
++
++    private fun sample(view: View?, foreground: Boolean = false): RothkoKeyguardGeomView {
++        Assert.isMainThread()
++        if (view == null) return RothkoKeyguardGeomView(RothkoKeyguardGeomState.MISSING)
++        if (!view.isAttachedToWindow) return RothkoKeyguardGeomView(RothkoKeyguardGeomState.DETACHED)
++        if (!view.isLaidOut) return RothkoKeyguardGeomView(RothkoKeyguardGeomState.UNKNOWN)
++        val screen = Rect()
++        view.getBoundsOnScreen(screen)
++        val image = if (foreground) view as? ImageView else null
++        val drawable = image?.drawable
++        return RothkoKeyguardGeomView(
++            state = RothkoKeyguardGeomState.READY,
++            screen = screen.scalars(),
++            width = view.width,
++            height = view.height,
++            visibility = view.visibility,
++            alpha = view.alpha,
++            tx = view.translationX,
++            ty = view.translationY,
++            sx = view.scaleX,
++            sy = view.scaleY,
++            padding = RothkoKeyguardGeomRect(view.paddingLeft, view.paddingTop, view.paddingRight, view.paddingBottom),
++            scaleType = image?.scaleType?.ordinal ?: -1,
++            intrinsicWidth = drawable?.intrinsicWidth ?: -1,
++            intrinsicHeight = drawable?.intrinsicHeight ?: -1,
++            drawableBounds = drawable?.bounds?.scalars(),
++        )
++    }
++
++    private fun Rect.scalars() = RothkoKeyguardGeomRect(left, top, right, bottom)
++
++    // Do not read View/resources/properties, acquire locks, or wait for UI work on this path.
++    override fun dump(pw: PrintWriter, args: Array<out String>) = publication.dump(pw)
++
++    companion object {
++        const val DUMP_NAME = "RothkoKeyguardGeom"
++
++        /** Same existing readonly opt-in as the device's FOD bridge; not a new security flag. */
++        fun enabled(context: Context): Boolean {
++            val id = context.resources.getIdentifier("config_rothkoFodStateBridgeEnabled", "bool", "android")
++            return id != 0 && context.resources.getBoolean(id) &&
++                SystemProperties.getBoolean("ro.hardware.fp.fod", false) &&
++                SystemProperties.get("ro.hardware.fp.fod.touch.ctl.version", "") == "2.0"
++        }
++    }
++}
++
++// Immutable scalar payloads only: no View, Rect, Drawable, CharSequence, arrays, or collections.
++internal enum class RothkoKeyguardGeomState { UNKNOWN, MISSING, DETACHED, READY }
++
++/** Only natural pre-draw callbacks drive this main-thread rate limit; no timer or redraw. */
++internal fun rothkoKeyguardGeomSampleDue(lastUptimeMs: Long?, nowUptimeMs: Long): Boolean =
++    lastUptimeMs == null || nowUptimeMs - lastUptimeMs >= 250L
++
++internal data class RothkoKeyguardGeomRect(val left: Int, val top: Int, val right: Int, val bottom: Int) {
++    fun scalars(): String = "$left,$top,$right,$bottom"
++}
++
++internal data class RothkoKeyguardGeomView(
++    val state: RothkoKeyguardGeomState,
++    val screen: RothkoKeyguardGeomRect? = null,
++    val width: Int = 0,
++    val height: Int = 0,
++    val visibility: Int = -1,
++    val alpha: Float = 0f,
++    val tx: Float = 0f,
++    val ty: Float = 0f,
++    val sx: Float = 1f,
++    val sy: Float = 1f,
++    val padding: RothkoKeyguardGeomRect? = null,
++    val scaleType: Int = -1,
++    val intrinsicWidth: Int = -1,
++    val intrinsicHeight: Int = -1,
++    val drawableBounds: RothkoKeyguardGeomRect? = null,
++) {
++    fun scalars(): String =
++        "state=$state screen=${screen?.scalars() ?: "UNKNOWN"} wh=$width,$height" +
++            " va=$visibility,$alpha ts=$tx,$ty,$sx,$sy p=${padding?.scalars() ?: "UNKNOWN"}"
++
++    fun foregroundScalars(): String =
++        " scaleType=$scaleType intrinsic=$intrinsicWidth,$intrinsicHeight" +
++            " drawable=${drawableBounds?.scalars() ?: "UNKNOWN"}"
++}
++
++internal data class RothkoKeyguardGeomSnapshot(
++    val uptimeMs: Long,
++    val root: RothkoKeyguardGeomView,
++    val entry: RothkoKeyguardGeomView,
++    val foreground: RothkoKeyguardGeomView,
++    val background: RothkoKeyguardGeomView,
++    val indication: RothkoKeyguardGeomView,
++    val top: RothkoKeyguardGeomView,
++    val bottom: RothkoKeyguardGeomView,
++    val lockPaddingPx: Int,
++    val bottomMarginPx: Int,
++    val minTextHeightPx: Int,
++)
++
++/** One immutable String publication: a dump reads one complete UI-frame snapshot, never Views. */
++internal class RothkoKeyguardGeomPublication {
++    @Volatile private var published: String = UNKNOWN
++
++    fun unavailable() { published = UNKNOWN }
++
++    fun publish(snapshot: RothkoKeyguardGeomSnapshot) {
++        val rendered = buildString {
++            append("$PREFIX state=${snapshot.root.state} uptimeMs=${snapshot.uptimeMs}\n")
++            append("$PREFIX dimPx=${snapshot.lockPaddingPx},${snapshot.bottomMarginPx},${snapshot.minTextHeightPx}\n")
++            append("$PREFIX root ${snapshot.root.scalars()}\n")
++            append("$PREFIX entry ${snapshot.entry.scalars()}\n")
++            append("$PREFIX fg ${snapshot.foreground.scalars()}${snapshot.foreground.foregroundScalars()}\n")
++            append("$PREFIX bg ${snapshot.background.scalars()}\n")
++            append("$PREFIX indication ${snapshot.indication.scalars()}\n")
++            append("$PREFIX top ${snapshot.top.scalars()}\n")
++            append("$PREFIX bottom ${snapshot.bottom.scalars()}\n")
++        }
++        // ASCII scalars make this a byte bound too; never truncate into a partial geometry record.
++        published = if (rendered.length <= 4096 && rendered.count { it == '\n' } <= 12 &&
++            rendered.all { it.code < 128 }) rendered else UNKNOWN
++    }
++
++    fun dump(pw: PrintWriter) {
++        val snapshot = published
++        pw.print(snapshot)
++    }
++
++    companion object {
++        private const val PREFIX = "RothkoKeyguardGeom/1"
++        private const val UNKNOWN = "$PREFIX state=UNKNOWN\n"
++    }
++}
+diff --git a/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/DefaultIndicationAreaSection.kt b/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/DefaultIndicationAreaSection.kt
+index 5bf56e8de..01c5dc139 100644
+--- a/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/DefaultIndicationAreaSection.kt
++++ b/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/DefaultIndicationAreaSection.kt
+@@ -18,18 +18,31 @@
+ package com.android.systemui.keyguard.ui.view.layout.sections
+ 
+ import android.content.Context
++import android.content.res.Configuration
++import android.view.Surface
++import android.view.View
+ import android.view.ViewGroup
+ import androidx.constraintlayout.widget.ConstraintLayout
+ import androidx.constraintlayout.widget.ConstraintSet
++import androidx.lifecycle.Lifecycle
++import androidx.lifecycle.repeatOnLifecycle
++import com.android.app.tracing.coroutines.launchTraced as launch
+ import com.android.systemui.keyguard.shared.model.KeyguardSection
+ import com.android.systemui.keyguard.ui.binder.KeyguardIndicationAreaBinder
+ import com.android.systemui.keyguard.ui.view.KeyguardIndicationArea
++import com.android.systemui.keyguard.ui.view.RothkoKeyguardGeometry
++import com.android.systemui.keyguard.ui.viewmodel.DeviceEntryIconViewModel
+ import com.android.systemui.keyguard.ui.viewmodel.KeyguardIndicationAreaViewModel
++import com.android.systemui.lifecycle.repeatWhenAttached
+ import com.android.systemui.res.R
+ import com.android.systemui.shade.ShadeDisplayAware
+ import com.android.systemui.statusbar.KeyguardIndicationController
++import com.android.systemui.util.Assert
++import dagger.Lazy
+ import javax.inject.Inject
++import kotlinx.coroutines.awaitCancellation
+ import kotlinx.coroutines.DisposableHandle
++import kotlinx.coroutines.flow.combine
+ 
+ class DefaultIndicationAreaSection
+ @Inject
+@@ -37,34 +50,120 @@ constructor(
+     @ShadeDisplayAware private val context: Context,
+     private val keyguardIndicationAreaViewModel: KeyguardIndicationAreaViewModel,
+     private val indicationController: KeyguardIndicationController,
++    private val deviceEntryIconViewModel: Lazy<DeviceEntryIconViewModel>,
+ ) : KeyguardSection() {
+     private val indicationAreaViewId = R.id.keyguard_indication_area
+     private var indicationAreaHandle: DisposableHandle? = null
++    private var spacingHandle: DisposableHandle? = null
++    private var rootView: ConstraintLayout? = null
++    private val useRothkoSpacing = RothkoKeyguardGeometry.enabled(context)
+ 
+     override fun addViews(constraintLayout: ConstraintLayout) {
++        rootView = constraintLayout
+         val view = KeyguardIndicationArea(context, null)
+         constraintLayout.addView(view)
+     }
+ 
+     override fun bindData(constraintLayout: ConstraintLayout) {
++        indicationAreaHandle?.dispose()
++        spacingHandle?.dispose()
+         indicationAreaHandle =
+             KeyguardIndicationAreaBinder.bind(
+                 constraintLayout.requireViewById(R.id.keyguard_indication_area),
+                 keyguardIndicationAreaViewModel,
+                 indicationController,
+             )
++        if (useRothkoSpacing) {
++            spacingHandle = constraintLayout.repeatWhenAttached {
++                repeatOnLifecycle(Lifecycle.State.CREATED) {
++                    val listener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
++                        updateSpacing(constraintLayout)
++                    }
++                    val indication = constraintLayout.requireViewById<View>(indicationAreaViewId)
++                    constraintLayout.addOnLayoutChangeListener(listener)
++                    indication.addOnLayoutChangeListener(listener)
++                    try {
++                        updateSpacing(constraintLayout)
++                        launch("DefaultIndicationAreaSection#udfpsSpacing") {
++                            val model = deviceEntryIconViewModel.get()
++                            combine(model.isUdfpsSupported, model.udfpsLocation) { supported, location ->
++                                supported to location
++                            }.collect { updateSpacing(constraintLayout) }
++                        }
++                        launch("DefaultIndicationAreaSection#spacingConfiguration") {
++                            keyguardIndicationAreaViewModel.configurationChange.collect {
++                                updateSpacing(constraintLayout)
++                            }
++                        }
++                        awaitCancellation()
++                    } finally {
++                        constraintLayout.removeOnLayoutChangeListener(listener)
++                        indication.removeOnLayoutChangeListener(listener)
++                    }
++                }
++            }
++        }
++    }
++
++    private fun spacingMargin(): Int? {
++        Assert.isMainThread()
++        if (!useRothkoSpacing) return null
++        val root = rootView ?: return null
++        val model = deviceEntryIconViewModel.get()
++        val location = model.udfpsLocation.value ?: return null
++        val resources = context.resources
++        val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT &&
++            root.display?.rotation == Surface.ROTATION_0
++        val centerX = location.centerX
++        val centerY = location.centerY
++        val radius = location.radius
++        val entry = root.findViewById<View>(R.id.device_entry_icon_view) ?: return null
++        if (entry.visibility != View.VISIBLE) return null
++        val indicationHeight = root.findViewById<View>(indicationAreaViewId)?.measuredHeight ?: 0
++        return rothkoIndicationSpacingMargin(
++            model.isUdfpsSupported.value,
++            portrait,
++            root.width,
++            root.height,
++            root.paddingTop,
++            centerX,
++            centerY,
++            radius,
++            indicationHeight,
++            resources.getDimensionPixelSize(R.dimen.keyguard_indication_text_padding),
++            resources.getDimensionPixelSize(R.dimen.keyguard_indication_y_translation),
++            resources.getDimensionPixelSize(R.dimen.default_burn_in_prevention_offset),
++        )
++    }
++
++    private fun updateSpacing(constraintLayout: ConstraintLayout) {
++        Assert.isMainThread()
++        val view = constraintLayout.findViewById<View>(indicationAreaViewId) ?: return
++        val lp = view.layoutParams as? ConstraintLayout.LayoutParams ?: return
++        val spacing = spacingMargin()
++        val target = if (spacing == null) ConstraintSet.UNSET else R.id.device_entry_icon_view
++        val parent = if (spacing == null) ConstraintSet.PARENT_ID else ConstraintSet.UNSET
++        val margin = spacing ?: context.resources.getDimensionPixelSize(R.dimen.keyguard_indication_margin_bottom)
++        // Target only this view's layout parameters. Do not reapply a whole ConstraintSet, which
++        // would overwrite the existing alpha/translation animations of entry or indication.
++        if (lp.bottomToTop == target && lp.bottomToBottom == parent && lp.bottomMargin == margin) return
++        lp.bottomToTop = target
++        lp.bottomToBottom = parent
++        lp.bottomMargin = margin
++        view.layoutParams = lp
+     }
+ 
+     override fun applyConstraints(constraintSet: ConstraintSet) {
++        val spacing = spacingMargin()
+         constraintSet.apply {
+             constrainWidth(indicationAreaViewId, ViewGroup.LayoutParams.MATCH_PARENT)
+             constrainHeight(indicationAreaViewId, ViewGroup.LayoutParams.WRAP_CONTENT)
+             connect(
+                 indicationAreaViewId,
+                 ConstraintSet.BOTTOM,
+-                ConstraintSet.PARENT_ID,
+-                ConstraintSet.BOTTOM,
+-                context.resources.getDimensionPixelSize(R.dimen.keyguard_indication_margin_bottom)
++                if (spacing == null) ConstraintSet.PARENT_ID else R.id.device_entry_icon_view,
++                if (spacing == null) ConstraintSet.BOTTOM else ConstraintSet.TOP,
++                spacing ?: context.resources.getDimensionPixelSize(R.dimen.keyguard_indication_margin_bottom)
+             )
+             connect(
+                 indicationAreaViewId,
+@@ -82,7 +181,39 @@ constructor(
+     }
+ 
+     override fun removeViews(constraintLayout: ConstraintLayout) {
++        spacingHandle?.dispose()
++        spacingHandle = null
+         indicationAreaHandle?.dispose()
++        indicationAreaHandle = null
++        rootView = null
+         constraintLayout.removeView(indicationAreaViewId)
+     }
+ }
++
++
++/** Keep the whole text container above the entry, including existing positive Y animations. */
++internal fun rothkoIndicationSpacingMargin(
++    supported: Boolean,
++    portrait: Boolean,
++    rootWidth: Int,
++    rootHeight: Int,
++    rootTopPadding: Int,
++    centerX: Float,
++    centerY: Float,
++    radius: Float,
++    indicationHeight: Int,
++    textGap: Int,
++    textTranslation: Int,
++    indicationBurnIn: Int,
++): Int? {
++    if (!supported || !portrait || rootWidth <= 0 || rootHeight <= 0 || indicationHeight <= 0) return null
++    if (!centerX.isFinite() || !centerY.isFinite() || !radius.isFinite() || radius < 1f) return null
++    if (centerX - radius < 0f || centerX + radius > rootWidth ||
++        centerY - radius < rootTopPadding || centerY + radius > rootHeight) return null
++    if (textGap < 0 || textTranslation < 0 || indicationBurnIn < 0) return null
++    val margin = textGap.toLong() + textTranslation + indicationBurnIn
++    // Match DefaultDeviceEntrySection's center/radius truncation, not an invented top inset.
++    val entryTop = centerY.toInt().toLong() - radius.toInt()
++    if (entryTop - margin - indicationHeight < rootTopPadding) return null
++    return margin.takeIf { it <= Int.MAX_VALUE }?.toInt()
++}
