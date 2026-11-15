@@ -1,0 +1,244 @@
+From 16b1ff2f38e71e4e3b201a44c2d035849b233c90 Mon Sep 17 00:00:00 2001
+From: lcy <admin@luchenyang.xyz>
+Date: Mon, 2 Nov 2026 01:04:31 +0800
+Subject: [PATCH 1/4] sepolicy: support device system_ext CIL additions
+
+Change-Id: If576581110f0bd3f3560a3b75ce1c5a058cd61c1
+---
+ Android.bp                  |   1 +
+ build/soong/selinux_test.go | 206 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 207 insertions(+)
+
+diff --git a/Android.bp b/Android.bp
+index 7c667c8d5..a07d722c9 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -330,6 +330,7 @@ se_policy_conf {
+ se_policy_cil {
+     name: "system_ext_sepolicy.cil",
+     src: ":system_ext_sepolicy.conf",
++    additional_cil_files: [":sepolicy_technical_debt{.system_ext_private}"],
+     system_ext_specific: true,
+     filter_out: [":plat_sepolicy.cil"],
+ }
+diff --git a/build/soong/selinux_test.go b/build/soong/selinux_test.go
+index ddf6cce6f..c86f11664 100644
+--- a/build/soong/selinux_test.go
++++ b/build/soong/selinux_test.go
+@@ -17,6 +17,7 @@ package selinux
+ import (
+ 	"os"
+ 	"reflect"
++	"strings"
+ 	"testing"
+ 
+ 	"android/soong/android"
+@@ -94,3 +95,208 @@ func TestFlagCollector(t *testing.T) {
+ 		)
+ 	}
+ }
++
++// prepareForBuildFilesTest registers se_build_files with the fixture context. Module
++// types registered by init() in production code are only registered with
++// android.InitRegistrationContext, so fixture tests need an explicit registration.
++// This is kept separate from prepareForTest so the flags fixture is untouched.
++var prepareForBuildFilesTest = android.GroupFixturePreparers(
++	android.PrepareForTestWithFilegroup,
++	android.FixtureRegisterWithContext(func(ctx android.RegistrationContext) {
++		ctx.RegisterModuleType("se_build_files", buildFilesFactory)
++	}),
++)
++
++const testBuildFilesAndroidBp = `
++	se_build_files {
++		name: "sepolicy_technical_debt",
++		srcs: ["technical_debt.cil"],
++	}
++`
++
++func testBuildFilesModule(t *testing.T, ctx *android.TestContext) *buildFiles {
++	t.Helper()
++	module := ctx.ModuleForTests(t, "sepolicy_technical_debt", "").Module()
++	b, ok := module.(*buildFiles)
++	if !ok {
++		t.Fatalf("sepolicy_technical_debt is a %T, expected *buildFiles", module)
++	}
++	return b
++}
++
++func testBuildFilesTag(t *testing.T, b *buildFiles, tag string) android.Paths {
++	t.Helper()
++	paths, ok := b.srcs[tag]
++	if !ok {
++		t.Fatalf("se_build_files did not export output tag %q", tag)
++	}
++	return paths
++}
++
++func TestBuildFilesSystemExtPrivateDirs(t *testing.T) {
++	t.Parallel()
++
++	ctx := android.GroupFixturePreparers(
++		prepareForBuildFilesTest,
++		android.FixtureModifyProductVariables(func(variables android.FixtureProductVariables) {
++			variables.SystemExtPrivateSepolicyDirs = []string{"device/foo/sepolicy/private"}
++			variables.SystemExtPublicSepolicyDirs = []string{"device/foo/sepolicy/public"}
++			variables.ProductPrivateSepolicyDirs = []string{"device/foo/product/private"}
++			variables.BoardVendorSepolicyDirs = []string{"device/foo/vendor"}
++		}),
++		android.FixtureAddTextFile("system/sepolicy/Android.bp", testBuildFilesAndroidBp),
++		android.FixtureAddTextFile("system/sepolicy/private/technical_debt.cil", "# plat private\n"),
++		android.FixtureAddTextFile("device/foo/sepolicy/private/technical_debt.cil", "# system_ext private\n"),
++		android.FixtureAddTextFile("device/foo/sepolicy/private/unrelated.te", "type unrelated;\n"),
++		android.FixtureAddTextFile("device/foo/sepolicy/public/technical_debt.cil", "# system_ext public\n"),
++		android.FixtureAddTextFile("device/foo/product/private/technical_debt.cil", "# product private\n"),
++		android.FixtureAddTextFile("device/foo/vendor/technical_debt.cil", "# vendor\n"),
++	).RunTest(t).TestContext
++
++	b := testBuildFilesModule(t, ctx)
++
++	// The module only names the CIL file. The directories it is collected from are
++	// selected by partition/scope tags, not by additional module properties.
++	if !reflect.DeepEqual(b.properties.Srcs, []string{"technical_debt.cil"}) {
++		t.Errorf("unexpected module srcs"+
++			"\nactual:   %v"+
++			"\nexpected: %v",
++			b.properties.Srcs,
++			[]string{"technical_debt.cil"},
++		)
++	}
++
++	expectedSystemExtPrivate := []string{"device/foo/sepolicy/private/technical_debt.cil"}
++	actualSystemExtPrivate := testBuildFilesTag(t, b, ".system_ext_private").Strings()
++	if !reflect.DeepEqual(actualSystemExtPrivate, expectedSystemExtPrivate) {
++		t.Errorf(".system_ext_private contains unexpected files"+
++			"\nactual:   %v"+
++			"\nexpected: %v",
++			actualSystemExtPrivate,
++			expectedSystemExtPrivate,
++		)
++	}
++
++	// The platform private partition is collected separately.
++	platPrivate := testBuildFilesTag(t, b, ".plat_private").Strings()
++	expectedPlatPrivate := []string{"system/sepolicy/private/technical_debt.cil"}
++	if !reflect.DeepEqual(platPrivate, expectedPlatPrivate) {
++		t.Errorf(".plat_private contains unexpected files"+
++			"\nactual:   %v"+
++			"\nexpected: %v",
++			platPrivate,
++			expectedPlatPrivate,
++		)
++	}
++
++	// The same file name in public, product and vendor dirs stays in its own tags and
++	// must not leak into the system_ext private tag.
++	expectedSystemExtPublic := []string{"device/foo/sepolicy/public/technical_debt.cil"}
++	actualSystemExtPublic := testBuildFilesTag(t, b, ".system_ext_public").Strings()
++	if !reflect.DeepEqual(actualSystemExtPublic, expectedSystemExtPublic) {
++		t.Errorf(".system_ext_public contains unexpected files"+
++			"\nactual:   %v"+
++			"\nexpected: %v",
++			actualSystemExtPublic,
++			expectedSystemExtPublic,
++		)
++	}
++
++	for tag, paths := range b.srcs {
++		for _, path := range paths.Strings() {
++			if strings.HasSuffix(path, ".te") {
++				t.Errorf("tag %q collected non-CIL source %q", tag, path)
++			}
++			if tag != ".system_ext_private" && strings.HasPrefix(path, "device/foo/sepolicy/private/") {
++				t.Errorf("tag %q leaked system_ext private file %q", tag, path)
++			}
++		}
++	}
++}
++
++func TestBuildFilesEmptySystemExtPrivateDirs(t *testing.T) {
++	t.Parallel()
++
++	ctx := android.GroupFixturePreparers(
++		prepareForBuildFilesTest,
++		android.FixtureAddTextFile("system/sepolicy/Android.bp", testBuildFilesAndroidBp),
++		android.FixtureAddTextFile("system/sepolicy/private/technical_debt.cil", "# plat private\n"),
++		android.FixtureAddTextFile("device/foo/sepolicy/private/technical_debt.cil", "# not selected\n"),
++	).RunTest(t).TestContext
++
++	b := testBuildFilesModule(t, ctx)
++
++	// With no SYSTEM_EXT_PRIVATE_SEPOLICY_DIR configured the tag must still be
++	// exported as empty instead of being missing.
++	if actual := testBuildFilesTag(t, b, ".system_ext_private").Strings(); len(actual) != 0 {
++		t.Errorf("expected .system_ext_private to be empty, got %v", actual)
++	}
++
++	// The platform private dir is independent of the system_ext setting.
++	expectedPlatPrivate := []string{"system/sepolicy/private/technical_debt.cil"}
++	actualPlatPrivate := testBuildFilesTag(t, b, ".plat_private").Strings()
++	if !reflect.DeepEqual(actualPlatPrivate, expectedPlatPrivate) {
++		t.Errorf(".plat_private contains unexpected files"+
++			"\nactual:   %v"+
++			"\nexpected: %v",
++			actualPlatPrivate,
++			expectedPlatPrivate,
++		)
++	}
++}
++
++func TestBuildFilesFilegroupTagResolution(t *testing.T) {
++	t.Parallel()
++
++	ctx := android.GroupFixturePreparers(
++		prepareForBuildFilesTest,
++		android.FixtureModifyProductVariables(func(variables android.FixtureProductVariables) {
++			variables.SystemExtPrivateSepolicyDirs = []string{"device/foo/sepolicy/private"}
++		}),
++		android.FixtureAddTextFile("system/sepolicy/Android.bp", testBuildFilesAndroidBp+`
++			filegroup {
++				name: "technical_debt_consumer",
++				srcs: [":sepolicy_technical_debt{.system_ext_private}"],
++			}
++		`),
++		android.FixtureAddTextFile("device/foo/sepolicy/private/technical_debt.cil", "# system_ext private\n"),
++	).RunTest(t).TestContext
++
++	b := testBuildFilesModule(t, ctx)
++
++	// Every partition/scope tag is still exported, even when no directory is
++	// configured for it.
++	for _, tag := range []string{
++		".reqd_mask",
++		".plat_public",
++		".plat_private",
++		".plat_vendor",
++		".system_ext_public",
++		".system_ext_private",
++		".product_public",
++		".product_private",
++		".vendor",
++		".odm",
++	} {
++		if _, ok := b.srcs[tag]; !ok {
++			t.Errorf("se_build_files did not export output tag %q", tag)
++		}
++	}
++
++	// A filegroup consumer using the ".system_ext_private" tag resolves to exactly
++	// the files collected from SYSTEM_EXT_PRIVATE_SEPOLICY_DIR.
++	consumer := ctx.ModuleForTests(t, "technical_debt_consumer", "").Module()
++	producer, ok := consumer.(android.SourceFileProducer)
++	if !ok {
++		t.Fatalf("technical_debt_consumer is a %T, expected android.SourceFileProducer", consumer)
++	}
++	expected := []string{"device/foo/sepolicy/private/technical_debt.cil"}
++	if actual := producer.Srcs().Strings(); !reflect.DeepEqual(actual, expected) {
++		t.Errorf("filegroup did not resolve the .system_ext_private tag"+
++			"\nactual:   %v"+
++			"\nexpected: %v",
++			actual,
++			expected,
++		)
++	}
++}

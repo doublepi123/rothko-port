@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Template. Set the rothko remote fetch URL to the account that hosts the forks. -->
+<manifest>
+  <remote name="rothko" fetch="https://github.com/YOUR-ACCOUNT" revision="lineage-23.2" />
+
+  <project path="device/xiaomi/rothko" name="android_device_xiaomi_rothko" remote="rothko" />
+  <project path="vendor/xiaomi/rothko" name="android_vendor_xiaomi_rothko" remote="rothko" />
+
+  <remove-project name="LineageOS/android_frameworks_base" />
+  <project path="frameworks/base" name="android_frameworks_base" remote="rothko" />
+  <remove-project name="LineageOS/android_frameworks_native" />
+  <project path="frameworks/native" name="android_frameworks_native" remote="rothko" />
+  <remove-project name="LineageOS/android_packages_apps_Settings" />
+  <project path="packages/apps/Settings" name="android_packages_apps_Settings" remote="rothko" />
+  <remove-project name="platform/packages/apps/CarrierConfig" />
+  <project path="packages/apps/CarrierConfig" name="android_packages_apps_CarrierConfig" remote="rothko" />
+  <remove-project name="LineageOS/android_bootable_recovery" />
+  <project path="bootable/recovery" name="android_bootable_recovery" remote="rothko" />
+  <remove-project name="LineageOS/android_system_sepolicy" />
+  <project path="system/sepolicy" name="android_system_sepolicy" remote="rothko" />
+  <remove-project name="platform/external/perfetto" />
+  <project path="external/perfetto" name="android_external_perfetto" remote="rothko" />
+</manifest>

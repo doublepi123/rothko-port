@@ -1,0 +1,1604 @@
+From f68de8f4da68535abaeb5eea8371e8b2f0f830d6 Mon Sep 17 00:00:00 2001
+From: lcy <admin@luchenyang.xyz>
+Date: Sun, 15 Nov 2026 10:05:27 +0800
+Subject: [PATCH 4/4] sepolicy: checked top-half revisions and VM data write
+ exception
+
+- combine_maps / cil_compat_map: optional checked revisions of
+  typeattributesets in the top half, applied in memory only.
+- domain.te: narrow vendor_vm_data_file:file:write exception for crosvm,
+  early_virtmgr and virtualizationmanager.
+- Fixtures and tests for both.
+---
+ Android.bp                                    |   7 +-
+ build/soong/Android.bp                        |   2 +
+ build/soong/cil_compat_map.go                 | 115 ++++-
+ .../soong/f06_cil_compat_map_fixture_test.go  | 349 +++++++++++++++
+ build/soong/f06_post_te_source_hook_test.go   | 212 +++++++++
+ compat/Android.bp                             |  18 +
+ private/domain.te                             |  56 ++-
+ tests/combine_maps.py                         | 146 ++++++-
+ tests/prototype_fixtures/bottom_202404.cil    |  14 +
+ tests/prototype_fixtures/bottom_33.cil        |  10 +
+ tests/prototype_fixtures/bottom_34.cil        |  12 +
+ tests/prototype_fixtures/goldens.json         |  20 +
+ tests/prototype_fixtures/top_202404.cil       |  19 +
+ tests/test_checked_top_revision.py            | 402 ++++++++++++++++++
+ 14 files changed, 1372 insertions(+), 10 deletions(-)
+ create mode 100644 build/soong/f06_cil_compat_map_fixture_test.go
+ create mode 100644 build/soong/f06_post_te_source_hook_test.go
+ create mode 100644 tests/prototype_fixtures/bottom_202404.cil
+ create mode 100644 tests/prototype_fixtures/bottom_33.cil
+ create mode 100644 tests/prototype_fixtures/bottom_34.cil
+ create mode 100644 tests/prototype_fixtures/goldens.json
+ create mode 100644 tests/prototype_fixtures/top_202404.cil
+ create mode 100644 tests/test_checked_top_revision.py
+
+diff --git a/Android.bp b/Android.bp
+index a07d722c9..01393d970 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -90,6 +90,11 @@ se_build_files {
+     srcs: ["technical_debt.cil"],
+ }
+ 
++se_build_files {
++    name: "sepolicy_compatibility_migrations",
++    srcs: ["compatibility_migrations.cil"],
++}
++
+ phony {
+     // Currently used only for aosp_cf_system_x86_64
+     // TODO(b/329208946): migrate selinux_policy_system to Soong
+@@ -330,7 +335,7 @@ se_policy_conf {
+ se_policy_cil {
+     name: "system_ext_sepolicy.cil",
+     src: ":system_ext_sepolicy.conf",
+-    additional_cil_files: [":sepolicy_technical_debt{.system_ext_private}"],
++    additional_cil_files: [":sepolicy_technical_debt{.system_ext_private}", ":sepolicy_compatibility_migrations{.system_ext_private}"],
+     system_ext_specific: true,
+     filter_out: [":plat_sepolicy.cil"],
+ }
+diff --git a/build/soong/Android.bp b/build/soong/Android.bp
+index 343d7abd0..53cd371d1 100644
+--- a/build/soong/Android.bp
++++ b/build/soong/Android.bp
+@@ -51,6 +51,8 @@ bootstrap_go_package {
+     testSrcs: [
+         "selinux_test.go",
+         "zygote_next_feature_test.go",
++        "f06_cil_compat_map_fixture_test.go",
++        "f06_post_te_source_hook_test.go",
+     ],
+     pluginFor: ["soong_build"],
+ }
+diff --git a/build/soong/cil_compat_map.go b/build/soong/cil_compat_map.go
+index d563f04dc..5744858c1 100644
+--- a/build/soong/cil_compat_map.go
++++ b/build/soong/cil_compat_map.go
+@@ -18,6 +18,9 @@ package selinux
+ // sepolicy backwards compatibility mapping files.
+ 
+ import (
++	"encoding/json"
++	"fmt"
++
+ 	"android/soong/android"
+ 
+ 	"github.com/google/blueprint"
+@@ -41,6 +44,17 @@ var (
+ 	TopHalfDepTag = dependencyTag{name: "top"}
+ )
+ 
++var combineMapsRevisionRule = pctx.StaticRule(
++	"combineMapsRevisionRule",
++	blueprint.RuleParams{
++		Command:     combineMapsCmd + " ${revisionArgs}",
++		CommandDeps: []string{"${combine_maps}"},
++	},
++	"topHalf",
++	"bottomHalf",
++	"revisionArgs",
++)
++
+ func init() {
+ 	android.RegisterModuleType("se_cil_compat_map", cilCompatMapFactory)
+ 	pctx.Import("android/soong/android")
+@@ -68,6 +82,65 @@ type cilCompatMapProperties struct {
+ 	// Target version that this module supports. This module will be ignored if platform sepolicy
+ 	// version is same as this module's version.
+ 	Version *string
++	// Optional checked revisions of typeattributesets in the top half. Each
++	// revision requires the selector's exact current members and removes a
++	// non-empty proper subset of them before combining. Revisions are applied
++	// in memory only; top-half inputs are not modified. Requires top_half.
++	Checked_top_revisions []cilCompatMapRevision
++}
++
++type cilCompatMapRevision struct {
++	Selector         string   `json:"selector"`
++	Expected_members []string `json:"expected_members"`
++	Remove_members   []string `json:"remove_members"`
++}
++
++func validateCheckedTopRevisions(revisions []cilCompatMapRevision) error {
++	selectors := make(map[string]bool)
++	for i, revision := range revisions {
++		if revision.Selector == "" {
++			return fmt.Errorf("checked_top_revisions[%d]: selector is required", i)
++		}
++		if selectors[revision.Selector] {
++			return fmt.Errorf("checked_top_revisions[%d]: duplicate selector %q", i, revision.Selector)
++		}
++		selectors[revision.Selector] = true
++
++		if len(revision.Expected_members) == 0 {
++			return fmt.Errorf("checked_top_revisions[%d]: expected_members must not be empty", i)
++		}
++		expected := make(map[string]bool)
++		for _, member := range revision.Expected_members {
++			if member == "" {
++				return fmt.Errorf("checked_top_revisions[%d]: expected_members must contain only non-empty strings", i)
++			}
++			if expected[member] {
++				return fmt.Errorf("checked_top_revisions[%d]: duplicate expected member %q", i, member)
++			}
++			expected[member] = true
++		}
++
++		if len(revision.Remove_members) == 0 {
++			return fmt.Errorf("checked_top_revisions[%d]: remove_members must not be empty", i)
++		}
++		removed := make(map[string]bool)
++		for _, member := range revision.Remove_members {
++			if member == "" {
++				return fmt.Errorf("checked_top_revisions[%d]: remove_members must contain only non-empty strings", i)
++			}
++			if removed[member] {
++				return fmt.Errorf("checked_top_revisions[%d]: duplicate remove member %q", i, member)
++			}
++			removed[member] = true
++			if !expected[member] {
++				return fmt.Errorf("checked_top_revisions[%d]: remove member %q is not in expected_members", i, member)
++			}
++		}
++		if len(removed) == len(expected) {
++			return fmt.Errorf("checked_top_revisions[%d]: remove_members must leave at least one expected member", i)
++		}
++	}
++	return nil
+ }
+ 
+ type cilCompatMap struct {
+@@ -110,10 +183,34 @@ func (c *cilCompatMap) stem() string {
+ }
+ 
+ func (c *cilCompatMap) GenerateAndroidBuildActions(ctx android.ModuleContext) {
++	// Version == PlatformSepolicyVersion keeps the existing module-level skip:
++	// the module is not built, so its revisions are not considered either.
+ 	if c.shouldSkipBuild(ctx) {
+ 		return
+ 	}
+ 
++	if err := validateCheckedTopRevisions(c.properties.Checked_top_revisions); err != nil {
++		ctx.PropertyErrorf("checked_top_revisions", "%s", err.Error())
++		return
++	}
++
++	topHalf := expandTopHalf(ctx)
++	if len(c.properties.Checked_top_revisions) > 0 && !topHalf.Valid() {
++		ctx.PropertyErrorf("checked_top_revisions",
++			"checked_top_revisions requires top_half to provide an actual top mapping")
++		return
++	}
++
++	revisionArgs := ""
++	for _, revision := range c.properties.Checked_top_revisions {
++		encoded, err := json.Marshal(revision)
++		if err != nil {
++			ctx.PropertyErrorf("checked_top_revisions", "cannot encode revision: %s", err)
++			return
++		}
++		revisionArgs += " --checked-revision " + proptools.NinjaAndShellEscape(string(encoded))
++	}
++
+ 	c.installPath = android.PathForModuleInstall(ctx, "etc", "selinux", "mapping")
+ 
+ 	srcFiles := expandSeSources(ctx, c.properties.Bottom_half)
+@@ -131,20 +228,26 @@ func (c *cilCompatMap) GenerateAndroidBuildActions(ctx android.ModuleContext) {
+ 		Inputs: srcFiles,
+ 	})
+ 
+-	topHalf := expandTopHalf(ctx)
+ 	if topHalf.Valid() {
++		rule := combineMapsRule
++		args := map[string]string{
++			"topHalf":    topHalf.String(),
++			"bottomHalf": bottomHalf.String(),
++		}
++		if revisionArgs != "" {
++			rule = combineMapsRevisionRule
++			args["revisionArgs"] = revisionArgs
++		}
++
+ 		out := android.PathForModuleGen(ctx, c.Name())
+ 		ctx.Build(pctx, android.BuildParams{
+-			Rule:   combineMapsRule,
++			Rule:   rule,
+ 			Output: out,
+ 			Implicits: []android.Path{
+ 				topHalf.Path(),
+ 				bottomHalf,
+ 			},
+-			Args: map[string]string{
+-				"topHalf":    topHalf.String(),
+-				"bottomHalf": bottomHalf.String(),
+-			},
++			Args: args,
+ 		})
+ 		c.installSource = android.OptionalPathForPath(out)
+ 	} else {
+diff --git a/build/soong/f06_cil_compat_map_fixture_test.go b/build/soong/f06_cil_compat_map_fixture_test.go
+new file mode 100644
+index 000000000..71496af28
+--- /dev/null
++++ b/build/soong/f06_cil_compat_map_fixture_test.go
+@@ -0,0 +1,349 @@
++// Copyright 2026 The Android Open Source Project
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// F06 focused Soong fixture coverage for the checked_top_revisions prototype.
++//
++// These tests use the real android.Test fixture harness, the real
++// se_cil_compat_map module factory, real module dependency resolution and real
++// generated build actions. They do not run combine_maps and they do not
++// compile native policy. The prototype default is OFF in production: this file
++// lives only in the disposable fixture copy of the package.
++package selinux
++
++import (
++	"encoding/json"
++	"strings"
++	"testing"
++
++	"android/soong/android"
++
++	"github.com/google/blueprint/proptools"
++)
++
++const f06PlatformSepolicyVersion = "34"
++
++// f06CombineMapsCommand is the unchanged default combine_maps command from
++// production. The rule's own Command string is not exposed by the test
++// fixture for package-level static rules, so the expanded Ninja flag string is
++// rebuilt from this unchanged command plus the recorded build action args.
++const f06CombineMapsCommand = "${combine_maps} -t ${topHalf} -b ${bottomHalf} -o $out"
++
++// f06RelativeToTop mirrors the fixture's path normalization so provider paths
++// (not part of a build action) can be compared with action paths.
++func f06RelativeToTop(ctx *android.TestContext, path string) string {
++	out := ctx.Config().SoongOutDir()
++	if strings.HasPrefix(path, out+"/") {
++		return "out/soong/" + strings.TrimPrefix(path, out+"/")
++	}
++	return path
++}
++
++// prepareForF06CilCompatMap registers the real se_cil_compat_map module factory
++// with a fresh fixture registration context and pins the platform sepolicy
++// version so version-skip behaviour is deterministic.
++var prepareForF06CilCompatMap = android.GroupFixturePreparers(
++	android.PrepareForTestWithAndroidBuildComponents,
++	android.FixtureModifyProductVariables(func(variables android.FixtureProductVariables) {
++		variables.PlatformSepolicyVersion = proptools.StringPtr(f06PlatformSepolicyVersion)
++	}),
++	android.FixtureRegisterWithContext(func(ctx android.RegistrationContext) {
++		ctx.RegisterModuleType("se_cil_compat_map", cilCompatMapFactory)
++	}),
++)
++
++func f06AddCil(t *testing.T, path string, content string) android.FixturePreparer {
++	t.Helper()
++	return android.FixtureAddTextFile(path, content)
++}
++
++// TestF06VersionMatchSkipsAllBuildActions covers the legitimate
++// version==PlatformSepolicyVersion early return even when revisions are
++// configured: no Cat, no combine rule (with or without revision args), no
++// install action and no provider.
++func TestF06VersionMatchSkipsAllBuildActions(t *testing.T) {
++	ctx := android.GroupFixturePreparers(
++		prepareForF06CilCompatMap,
++		android.FixtureAddTextFile("system/sepolicy/build/soong/Android.bp", `
++se_cil_compat_map {
++    name: "f06_skip_top",
++    version: "34",
++    bottom_half: ["f06_skip_top.cil"],
++}
++se_cil_compat_map {
++    name: "f06_skip",
++    version: "34",
++    top_half: "f06_skip_top",
++    bottom_half: ["f06_skip.cil"],
++    checked_top_revisions: [{
++        selector: "virtual_face",
++        expected_members: ["fingerprint", "vendor_face"],
++        remove_members: ["vendor_face"],
++    }],
++}
++`),
++		f06AddCil(t, "system/sepolicy/build/soong/f06_skip_top.cil", "(typeattributeset virtual_face (fingerprint vendor_face))\n"),
++		f06AddCil(t, "system/sepolicy/build/soong/f06_skip.cil", "(typeattributeset virtual_face (fingerprint vendor_face))\n"),
++	).RunTest(t).TestContext
++
++	for _, name := range []string{"f06_skip_top", "f06_skip"} {
++		m := ctx.ModuleForTests(t, name, "android_common")
++		for _, rule := range []string{"Cat", "combineMapsRule", "combineMapsRevisionRule", "CpWithBash"} {
++			if got := m.MaybeRule(rule); got.Rule != nil {
++				t.Errorf("%s: version-skipped module generated a %q action: %+v", name, rule, got)
++			}
++		}
++		if info, ok := android.OtherModuleProvider(ctx.OtherModuleProviderAdaptor(), m.Module(), CilCompatMapGeneratorInfoProvider); ok {
++			t.Errorf("%s: version-skipped module must not provide CilCompatMapGeneratorInfo, got %+v", name, info)
++		}
++	}
++}
++
++// TestF06CheckedRevisionsRequireTopProvider covers the active-module case where
++// top_half names a real se_cil_compat_map that is itself version-skipped, so it
++// never runs SetProvider and contributes an invalid GeneratedMapFile. The
++// consumer must fail through PropertyErrorf instead of silently combining only
++// the bottom half.
++func TestF06CheckedRevisionsRequireTopProvider(t *testing.T) {
++	ctx := android.GroupFixturePreparers(
++		prepareForF06CilCompatMap,
++		android.FixtureAddTextFile("system/sepolicy/build/soong/Android.bp", `
++se_cil_compat_map {
++    name: "f06_absent_top",
++    version: "34",
++    bottom_half: ["f06_absent_top.cil"],
++}
++se_cil_compat_map {
++    name: "f06_revisions_without_top",
++    version: "33",
++    top_half: "f06_absent_top",
++    bottom_half: ["f06_revisions_without_top.cil"],
++    checked_top_revisions: [{
++        selector: "virtual_face",
++        expected_members: ["fingerprint", "vendor_face"],
++        remove_members: ["vendor_face"],
++    }],
++}
++`),
++		f06AddCil(t, "system/sepolicy/build/soong/f06_absent_top.cil", "(typeattributeset virtual_face (fingerprint vendor_face))\n"),
++		f06AddCil(t, "system/sepolicy/build/soong/f06_revisions_without_top.cil", "(typeattributeset virtual_face (fingerprint vendor_face))\n"),
++	).ExtendWithErrorHandler(android.FixtureExpectsAtLeastOneErrorMatchingPattern(
++		"checked_top_revisions requires top_half to provide an actual top mapping")).RunTest(t).TestContext
++
++	// Precondition: the real skipped module must not have published a top
++	// mapping. This is what makes the consumer's top invalid without faking a
++	// provider or module context.
++	absent := ctx.ModuleForTests(t, "f06_absent_top", "android_common")
++	if info, ok := android.OtherModuleProvider(ctx.OtherModuleProviderAdaptor(), absent.Module(), CilCompatMapGeneratorInfoProvider); ok {
++		t.Fatalf("fixture precondition failed: skipped top provided %+v", info)
++	}
++	if got := absent.MaybeRule("Cat"); got.Rule != nil {
++		t.Errorf("skipped top must not generate Cat, got %+v", got)
++	}
++}
++
++// TestF06NoRevisionsKeepOriginalTopHalfCombine covers the unchanged
++// no-revisions path: Cat for the bottom half, the original combineMapsRule and
++// command with exactly topHalf/bottomHalf args, the top half coming from the
++// real provider of the top module, and an install of the combined output.
++func TestF06NoRevisionsKeepOriginalTopHalfCombine(t *testing.T) {
++	ctx := android.GroupFixturePreparers(
++		prepareForF06CilCompatMap,
++		android.FixtureAddTextFile("system/sepolicy/build/soong/Android.bp", `
++se_cil_compat_map {
++    name: "f06_top3",
++    bottom_half: ["f06_top3.cil"],
++}
++se_cil_compat_map {
++    name: "f06_combined3",
++    version: "33",
++    top_half: "f06_top3",
++    bottom_half: ["f06_bottom3_a.cil", "f06_bottom3_b.cil"],
++}
++`),
++		f06AddCil(t, "system/sepolicy/build/soong/f06_top3.cil", "(typeattributeset virtual_face (fingerprint vendor_face))\n"),
++		f06AddCil(t, "system/sepolicy/build/soong/f06_bottom3_a.cil", "(typeattributeset virtual_face (fingerprint))\n"),
++		f06AddCil(t, "system/sepolicy/build/soong/f06_bottom3_b.cil", "(typeattributeset virtual_face (vendor_face))\n"),
++	).RunTest(t).TestContext
++
++	top := ctx.ModuleForTests(t, "f06_top3", "android_common")
++	topInfo, ok := android.OtherModuleProvider(ctx.OtherModuleProviderAdaptor(), top.Module(), CilCompatMapGeneratorInfoProvider)
++	if !ok || !topInfo.GeneratedMapFile.Valid() {
++		t.Fatalf("real top module did not provide a valid generated map file: ok=%v info=%+v", ok, topInfo)
++	}
++	if combineMapsCmd != f06CombineMapsCommand {
++		t.Errorf("production combine_maps command changed\nactual:   %q\nexpected: %q", combineMapsCmd, f06CombineMapsCommand)
++	}
++
++	topCat := top.Rule("Cat")
++	topProvided := f06RelativeToTop(ctx, topInfo.GeneratedMapFile.String())
++	if got, want := topProvided, topCat.Output.String(); got != want {
++		t.Errorf("top provider path is not its generated Cat output\nactual:   %s\nexpected: %s", got, want)
++	}
++
++	combined := ctx.ModuleForTests(t, "f06_combined3", "android_common")
++	cat := combined.Rule("Cat")
++	wantBottomInputs := []string{
++		"system/sepolicy/build/soong/f06_bottom3_a.cil",
++		"system/sepolicy/build/soong/f06_bottom3_b.cil",
++	}
++	if got := cat.Inputs.Strings(); !equalStrings(got, wantBottomInputs) {
++		t.Errorf("bottom half Cat inputs changed\nactual:   %v\nexpected: %v", got, wantBottomInputs)
++	}
++
++	combine := combined.Rule("combineMapsRule")
++	if len(combine.Args) != 2 {
++		t.Errorf("no-revision path args must contain only topHalf and bottomHalf, got %v", combine.Args)
++	}
++	if got, want := combine.Args["topHalf"], topProvided; got != want {
++		t.Errorf("combineMapsRule topHalf does not come from the real top provider\nactual:   %s\nexpected: %s", got, want)
++	}
++	if got, want := combine.Args["bottomHalf"], cat.Output.String(); got != want {
++		t.Errorf("combineMapsRule bottomHalf is not the generated Cat output\nactual:   %s\nexpected: %s", got, want)
++	}
++	wantImplicits := []string{topProvided, cat.Output.String()}
++	if got := combine.Implicits.Strings(); !equalStrings(got, wantImplicits) {
++		t.Errorf("combineMapsRule implicits changed\nactual:   %v\nexpected: %v", got, wantImplicits)
++	}
++	if got := combined.MaybeRule("combineMapsRevisionRule"); got.Rule != nil {
++		t.Errorf("no-revision path must not use combineMapsRevisionRule, got %+v", got)
++	}
++
++	install := combined.Rule("CpWithBash")
++	if got, want := install.Input.String(), combine.Output.String(); got != want {
++		t.Errorf("installed file is not the combined top+bottom output\nactual:   %s\nexpected: %s", got, want)
++	}
++	if got, want := install.Output.Base(), "f06_combined3"; got != want {
++		t.Errorf("installed stem changed\nactual:   %s\nexpected: %s", got, want)
++	}
++}
++
++// TestF06RevisionArgsAreExactEscapedJSON covers the revision path: two
++// revisions (selectors virtual_face and fingerprint), each with two expected
++// members and one removal, encoded with encoding/json and
++// proptools.NinjaAndShellEscape, the actual rule command template and the top
++// dependency provider path.
++func TestF06RevisionArgsAreExactEscapedJSON(t *testing.T) {
++	ctx := android.GroupFixturePreparers(
++		prepareForF06CilCompatMap,
++		android.FixtureAddTextFile("system/sepolicy/build/soong/Android.bp", `
++se_cil_compat_map {
++    name: "f06_top4",
++    bottom_half: ["f06_top4.cil"],
++}
++se_cil_compat_map {
++    name: "f06_revised4",
++    version: "33",
++    top_half: "f06_top4",
++    bottom_half: ["f06_bottom4.cil"],
++    checked_top_revisions: [
++        {
++            selector: "virtual_face",
++            expected_members: ["fingerprint", "vendor_face"],
++            remove_members: ["vendor_face"],
++        },
++        {
++            selector: "fingerprint",
++            expected_members: ["virtual_face", "vendor_face"],
++            remove_members: ["vendor_face"],
++        },
++    ],
++}
++`),
++		f06AddCil(t, "system/sepolicy/build/soong/f06_top4.cil", "(typeattributeset virtual_face (fingerprint vendor_face))\n(typeattributeset fingerprint (virtual_face vendor_face))\n"),
++		f06AddCil(t, "system/sepolicy/build/soong/f06_bottom4.cil", "(typeattributeset virtual_face (fingerprint))\n"),
++	).RunTest(t).TestContext
++
++	top := ctx.ModuleForTests(t, "f06_top4", "android_common")
++	topInfo, ok := android.OtherModuleProvider(ctx.OtherModuleProviderAdaptor(), top.Module(), CilCompatMapGeneratorInfoProvider)
++	if !ok || !topInfo.GeneratedMapFile.Valid() {
++		t.Fatalf("real top module did not provide a valid generated map file: ok=%v info=%+v", ok, topInfo)
++	}
++
++	rev1 := cilCompatMapRevision{
++		Selector:         "virtual_face",
++		Expected_members: []string{"fingerprint", "vendor_face"},
++		Remove_members:   []string{"vendor_face"},
++	}
++	rev2 := cilCompatMapRevision{
++		Selector:         "fingerprint",
++		Expected_members: []string{"virtual_face", "vendor_face"},
++		Remove_members:   []string{"vendor_face"},
++	}
++	json1, err := json.Marshal(rev1)
++	if err != nil {
++		t.Fatalf("marshal first revision: %v", err)
++	}
++	json2, err := json.Marshal(rev2)
++	if err != nil {
++		t.Fatalf("marshal second revision: %v", err)
++	}
++
++	// Independent literal expectation: encoding/json field order, both
++	// expected members retained, one removal, and single-quoted shell/ninja
++	// escaping.
++	literalFlag1 := ` --checked-revision '{"selector":"virtual_face","expected_members":["fingerprint","vendor_face"],"remove_members":["vendor_face"]}'`
++	literalFlag2 := ` --checked-revision '{"selector":"fingerprint","expected_members":["virtual_face","vendor_face"],"remove_members":["vendor_face"]}'`
++	wantArgs := literalFlag1 + literalFlag2
++
++	computedArgs := " --checked-revision " + proptools.NinjaAndShellEscape(string(json1)) +
++		" --checked-revision " + proptools.NinjaAndShellEscape(string(json2))
++
++	combined := ctx.ModuleForTests(t, "f06_revised4", "android_common")
++	revision := combined.Rule("combineMapsRevisionRule")
++	if got := revision.Args["revisionArgs"]; got != wantArgs {
++		t.Errorf("revision args are not the exact escaped JSON\nactual:   %q\nexpected: %q", got, wantArgs)
++	}
++	if got := revision.Args["revisionArgs"]; got != computedArgs {
++		t.Errorf("revision args do not match json.Marshal + proptools.NinjaAndShellEscape\nactual:   %q\nexpected: %q", got, computedArgs)
++	}
++	if combineMapsCmd != f06CombineMapsCommand {
++		t.Errorf("production combine_maps command changed\nactual:   %q\nexpected: %q", combineMapsCmd, f06CombineMapsCommand)
++	}
++	topProvided := f06RelativeToTop(ctx, topInfo.GeneratedMapFile.String())
++	if got, want := revision.Args["topHalf"], topProvided; got != want {
++		t.Errorf("revision rule topHalf does not come from the real top provider\nactual:   %s\nexpected: %s", got, want)
++	}
++
++	// Snapshot the actual expanded Ninja/shell flag string.
++	expandedCommand := f06CombineMapsCommand + " " + revision.Args["revisionArgs"]
++	if strings.Count(expandedCommand, "--checked-revision") != 2 {
++		t.Errorf("expanded command does not contain exactly two revisions: %q", expandedCommand)
++	}
++	for _, flag := range []string{literalFlag1, literalFlag2} {
++		if !strings.Contains(expandedCommand, flag) {
++			t.Errorf("expanded command lost quoted revision flag %q: %q", flag, expandedCommand)
++		}
++	}
++	if got, want := revision.Args["bottomHalf"], combined.Rule("Cat").Output.String(); got != want {
++		t.Errorf("revision rule bottomHalf is not the generated Cat output\nactual:   %s\nexpected: %s", got, want)
++	}
++	if got, want := revision.Implicits.Strings(), []string{topProvided, combined.Rule("Cat").Output.String()}; !equalStrings(got, want) {
++		t.Errorf("revision rule implicits changed\nactual:   %v\nexpected: %v", got, want)
++	}
++	if got := combined.MaybeRule("combineMapsRule"); got.Rule != nil {
++		t.Errorf("revision path must not use the plain combineMapsRule, got %+v", got)
++	}
++}
++
++func equalStrings(a, b []string) bool {
++	if len(a) != len(b) {
++		return false
++	}
++	for i := range a {
++		if a[i] != b[i] {
++			return false
++		}
++	}
++	return true
++}
+diff --git a/build/soong/f06_post_te_source_hook_test.go b/build/soong/f06_post_te_source_hook_test.go
+new file mode 100644
+index 000000000..a2fcfb4f2
+--- /dev/null
++++ b/build/soong/f06_post_te_source_hook_test.go
+@@ -0,0 +1,212 @@
++// Copyright 2026 The Android Open Source Project
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Focused post-TE migration source-hook fixture tests.
++//
++// These tests use the real se_build_files, se_policy_cil, filegroup and
++// android fixture harness. They validate source selection and append order;
++// they do not run secilc and do not activate any production source.
++package selinux
++
++import (
++	"strings"
++	"testing"
++
++	"android/soong/android"
++)
++
++var prepareForF06PostTESourceHook = android.GroupFixturePreparers(
++	android.PrepareForTestWithAndroidBuildComponents,
++	android.PrepareForTestWithFilegroup,
++	android.FixtureRegisterWithContext(func(ctx android.RegistrationContext) {
++		ctx.RegisterModuleType("se_build_files", buildFilesFactory)
++		ctx.RegisterModuleType("se_policy_cil", policyCilFactory)
++	}),
++)
++
++const f06PostTEAndroidBp = `
++se_build_files {
++    name: "sepolicy_technical_debt",
++    srcs: ["technical_debt.cil"],
++}
++se_build_files {
++    name: "sepolicy_compatibility_migrations",
++    srcs: ["compatibility_migrations.cil"],
++}
++se_policy_cil {
++    name: "system_ext_sepolicy.cil",
++    src: "system_ext_sepolicy.conf",
++    additional_cil_files: [":sepolicy_technical_debt{.system_ext_private}", ":sepolicy_compatibility_migrations{.system_ext_private}"],
++    filter_out: ["plat_sepolicy.cil"],
++    ignore_neverallow: false,
++}
++filegroup {
++    name: "f06_migration_consumer",
++    srcs: [":sepolicy_compatibility_migrations{.system_ext_private}"],
++}
++`
++
++func f06PostTEBasePreparers(extra ...android.FixturePreparer) android.FixturePreparer {
++	preparers := []android.FixturePreparer{
++		prepareForF06PostTESourceHook,
++		android.FixtureModifyProductVariables(func(variables android.FixtureProductVariables) {
++			variables.SystemExtPrivateSepolicyDirs = []string{"device/foo/sepolicy/private"}
++			variables.SystemExtPublicSepolicyDirs = []string{"device/foo/sepolicy/public"}
++			variables.BoardVendorSepolicyDirs = []string{"device/foo/vendor"}
++		}),
++		android.FixtureAddTextFile("system/sepolicy/Android.bp", f06PostTEAndroidBp),
++		android.FixtureAddTextFile("system/sepolicy/system_ext_sepolicy.conf", "# fixture conf\n"),
++		android.FixtureAddTextFile("system/sepolicy/plat_sepolicy.cil", "# fixture filter\n"),
++	}
++	preparers = append(preparers, extra...)
++	return android.GroupFixturePreparers(preparers...)
++}
++
++func f06PostTEEqualStrings(a, b []string) bool {
++	if len(a) != len(b) {
++		return false
++	}
++	for i := range a {
++		if a[i] != b[i] {
++			return false
++		}
++	}
++	return true
++}
++
++func f06PostTECilCommand(t *testing.T, ctx *android.TestContext) string {
++	t.Helper()
++	m := ctx.ModuleForTests(t, "system_ext_sepolicy.cil", "android_common")
++	return m.Rule("cil").RuleParams.Command
++}
++
++func f06PostTECatSegment(t *testing.T, cmd string) string {
++	t.Helper()
++	cat := strings.Index(cmd, "cat ")
++	secilc := strings.Index(cmd, "secilc ")
++	if cat < 0 || secilc < 0 || cat >= secilc {
++		t.Fatalf("cil command does not contain cat before secilc\ncommand: %s", cmd)
++	}
++	return cmd[cat:secilc]
++}
++
++func TestF06PostTEAbsentMigrationSelectedDirsKeepDebtOnly(t *testing.T) {
++	ctx := f06PostTEBasePreparers(
++		android.FixtureAddTextFile("device/foo/sepolicy/private/technical_debt.cil", "# debt\n"),
++	).RunTest(t).TestContext
++
++	b := ctx.ModuleForTests(t, "sepolicy_technical_debt", "").Module().(*buildFiles)
++	if got := b.srcs[".system_ext_private"].Strings(); len(got) != 1 || !strings.HasSuffix(got[0], "/technical_debt.cil") {
++		t.Errorf("debt tag is not exactly the technical_debt file: %v", got)
++	}
++	m := ctx.ModuleForTests(t, "sepolicy_compatibility_migrations", "").Module().(*buildFiles)
++	if got := m.srcs[".system_ext_private"].Strings(); len(got) != 0 {
++		t.Errorf("absent migration tag must be empty, got %v", got)
++	}
++
++	cmd := f06PostTECilCommand(t, ctx)
++	cat := f06PostTECatSegment(t, cmd)
++	if filter := strings.Index(cmd, "filter_out"); filter < 0 || strings.Index(cmd, "cat ") <= filter {
++		t.Errorf("filter_out must run before cat: %s", cmd)
++	}
++	if !strings.Contains(cat, "device/foo/sepolicy/private/technical_debt.cil") {
++		t.Errorf("debt file missing from cat segment: %s", cat)
++	}
++	if strings.Contains(cat, "compatibility_migrations.cil") {
++		t.Errorf("absent migration appeared in cat segment: %s", cat)
++	}
++	if strings.Contains(cmd, " -N") {
++		t.Errorf("secilc command must not use -N: %s", cmd)
++	}
++	if !strings.Contains(cmd, "filter_out") {
++		t.Errorf("filter_out action missing: %s", cmd)
++	}
++}
++
++func TestF06PostTEPresentMigrationAppendedAfterDebtBeforeSecilc(t *testing.T) {
++	ctx := f06PostTEBasePreparers(
++		android.FixtureAddTextFile("device/foo/sepolicy/private/technical_debt.cil", "# debt\n"),
++		android.FixtureAddTextFile("device/foo/sepolicy/private/compatibility_migrations.cil", "# migration\n"),
++	).RunTest(t).TestContext
++
++	m := ctx.ModuleForTests(t, "sepolicy_compatibility_migrations", "").Module().(*buildFiles)
++	got := m.srcs[".system_ext_private"].Strings()
++	if len(got) != 1 || !strings.HasSuffix(got[0], "/compatibility_migrations.cil") {
++		t.Errorf("migration tag is not exactly the private migration file: %v", got)
++	}
++
++	consumer := ctx.ModuleForTests(t, "f06_migration_consumer", "").Module()
++	producer, ok := consumer.(android.SourceFileProducer)
++	if !ok {
++		t.Fatalf("filegroup consumer is %T, expected android.SourceFileProducer", consumer)
++	}
++	if want := []string{"device/foo/sepolicy/private/compatibility_migrations.cil"}; !f06PostTEEqualStrings(producer.Srcs().Strings(), want) {
++		t.Errorf("filegroup tag resolution\nactual: %v\nexpected: %v", producer.Srcs().Strings(), want)
++	}
++
++	cmd := f06PostTECilCommand(t, ctx)
++	cat := f06PostTECatSegment(t, cmd)
++	if filter := strings.Index(cmd, "filter_out"); filter < 0 || strings.Index(cmd, "cat ") <= filter {
++		t.Errorf("filter_out must run before cat: %s", cmd)
++	}
++	debt := strings.Index(cat, "device/foo/sepolicy/private/technical_debt.cil")
++	mig := strings.Index(cat, "device/foo/sepolicy/private/compatibility_migrations.cil")
++	if debt < 0 || mig < 0 {
++		t.Fatalf("debt or migration missing from cat segment: %s", cat)
++	}
++	if debt >= mig {
++		t.Errorf("migration is not appended after debt: %s", cat)
++	}
++	if strings.Contains(cmd, " -N") {
++		t.Errorf("secilc command must not use -N: %s", cmd)
++	}
++}
++
++func TestF06PostTEUnselectedVendorPublicMigrationNotCaptured(t *testing.T) {
++	ctx := f06PostTEBasePreparers(
++		android.FixtureAddTextFile("device/foo/sepolicy/private/technical_debt.cil", "# debt\n"),
++		android.FixtureAddTextFile("device/foo/sepolicy/private/compatibility_migrations.cil", "# private migration\n"),
++		android.FixtureAddTextFile("device/foo/sepolicy/public/compatibility_migrations.cil", "# public migration\n"),
++		android.FixtureAddTextFile("device/foo/vendor/compatibility_migrations.cil", "# vendor migration\n"),
++	).RunTest(t).TestContext
++
++	m := ctx.ModuleForTests(t, "sepolicy_compatibility_migrations", "").Module().(*buildFiles)
++	priv := m.srcs[".system_ext_private"].Strings()
++	pub := m.srcs[".system_ext_public"].Strings()
++	ven := m.srcs[".vendor"].Strings()
++	if len(priv) != 1 || !strings.HasSuffix(priv[0], "device/foo/sepolicy/private/compatibility_migrations.cil") {
++		t.Errorf("private tag captured wrong files: %v", priv)
++	}
++	if len(pub) != 1 || !strings.HasSuffix(pub[0], "device/foo/sepolicy/public/compatibility_migrations.cil") {
++		t.Errorf("public tag captured wrong files: %v", pub)
++	}
++	if len(ven) != 1 || !strings.HasSuffix(ven[0], "device/foo/vendor/compatibility_migrations.cil") {
++		t.Errorf("vendor tag captured wrong files: %v", ven)
++	}
++
++	cmd := f06PostTECilCommand(t, ctx)
++	cat := f06PostTECatSegment(t, cmd)
++	if !strings.Contains(cat, "device/foo/sepolicy/private/compatibility_migrations.cil") {
++		t.Errorf("private migration missing from cat segment: %s", cat)
++	}
++	if strings.Contains(cat, "device/foo/sepolicy/public/compatibility_migrations.cil") {
++		t.Errorf("public migration leaked into system_ext_private selection: %s", cat)
++	}
++	if strings.Contains(cat, "device/foo/vendor/compatibility_migrations.cil") {
++		t.Errorf("vendor migration leaked into system_ext_private selection: %s", cat)
++	}
++	if strings.Contains(cmd, " -N") {
++		t.Errorf("secilc command must not use -N: %s", cmd)
++	}
++}
+diff --git a/compat/Android.bp b/compat/Android.bp
+index be895d9b0..549f62ab6 100644
+--- a/compat/Android.bp
++++ b/compat/Android.bp
+@@ -453,6 +453,24 @@ se_cil_compat_map {
+     bottom_half: [":34.0.board.compat.map{.plat_private}"],
+     version: "34.0",
+     top_half: "plat_202404.cil",
++    checked_top_revisions: [
++        {
++            selector: "virtual_face_hal_prop_202404",
++            expected_members: [
++                "virtual_face_hal_prop",
++                "virtual_face_prop",
++            ],
++            remove_members: ["virtual_face_prop"],
++        },
++        {
++            selector: "virtual_fingerprint_hal_prop_202404",
++            expected_members: [
++                "virtual_fingerprint_hal_prop",
++                "virtual_fingerprint_prop",
++            ],
++            remove_members: ["virtual_fingerprint_prop"],
++        },
++    ],
+ }
+ 
+ se_cil_compat_map {
+diff --git a/private/domain.te b/private/domain.te
+index bdc185c73..405ac26ee 100644
+--- a/private/domain.te
++++ b/private/domain.te
+@@ -779,6 +779,9 @@ neverallow { domain -init } properties_serial:file { no_w_file_perms no_x_file_p
+ # and invalidate dm-verity signatures.
+ neverallow {
+     domain
++    -crosvm
++    -virtualizationmanager
++    is_flag_enabled(RELEASE_AVF_ENABLE_EARLY_VM, `-early_virtmgr')
+     with_asan(`-asan_extract')
+     recovery_only(`userdebug_or_eng(`-fastbootd')')
+     userdebug_or_eng(`-kernel')
+@@ -789,6 +792,58 @@ neverallow {
+     exec_type
+ }:dir_file_class_set { create write setattr relabelfrom append unlink link rename };
+ 
++# Exact three-writer exception.  Only vendor_vm_data_file:file:write is
++# removed from the vendor-side neverallow for crosvm, early_virtmgr and
++# virtualizationmanager.  SYS/EXEC targets remain fully protected.
++neverallow {
++    crosvm
++    virtualizationmanager
++    is_flag_enabled(RELEASE_AVF_ENABLE_EARLY_VM, `early_virtmgr')
++    with_asan(`-asan_extract')
++    recovery_only(`userdebug_or_eng(`-fastbootd')')
++    userdebug_or_eng(`-kernel')
++    userdebug_or_eng(`-overlay_remounter')
++} {
++    system_file_type
++    exec_type
++}:dir_file_class_set { create write setattr relabelfrom append unlink link rename };
++
++neverallow {
++    crosvm
++    virtualizationmanager
++    is_flag_enabled(RELEASE_AVF_ENABLE_EARLY_VM, `early_virtmgr')
++    with_asan(`-asan_extract')
++    recovery_only(`userdebug_or_eng(`-fastbootd')')
++    userdebug_or_eng(`-kernel')
++    userdebug_or_eng(`-overlay_remounter')
++} {
++    vendor_file_type
++    -vendor_vm_data_file
++}:dir_file_class_set { create write setattr relabelfrom append unlink link rename };
++
++# The only permitted tuple is vendor_vm_data_file:file:write for these three.
++# Ban write on every non-file class, then ban the other seven permissions on
++# all dir_file_class_set classes, including file.
++neverallow {
++    crosvm
++    virtualizationmanager
++    is_flag_enabled(RELEASE_AVF_ENABLE_EARLY_VM, `early_virtmgr')
++    with_asan(`-asan_extract')
++    recovery_only(`userdebug_or_eng(`-fastbootd')')
++    userdebug_or_eng(`-kernel')
++    userdebug_or_eng(`-overlay_remounter')
++} vendor_vm_data_file:{ dir chr_file blk_file lnk_file sock_file fifo_file } write;
++
++neverallow {
++    crosvm
++    virtualizationmanager
++    is_flag_enabled(RELEASE_AVF_ENABLE_EARLY_VM, `early_virtmgr')
++    with_asan(`-asan_extract')
++    recovery_only(`userdebug_or_eng(`-fastbootd')')
++    userdebug_or_eng(`-kernel')
++    userdebug_or_eng(`-overlay_remounter')
++} vendor_vm_data_file:dir_file_class_set { create setattr relabelfrom append unlink link rename };
++
+ neverallow { domain -kernel with_asan(`-asan_extract') userdebug_or_eng(`-overlay_remounter') } { system_file_type vendor_file_type exec_type }:dir_file_class_set relabelto;
+ 
+ # Don't allow mounting on top of /system files or directories
+@@ -2365,4 +2420,3 @@ neverallow domain *:system x509_certificate_load;
+ neverallow domain proc:filesystem associate;
+ neverallow domain domain:dir { write add_name remove_name };
+ neverallow domain domain:file create;
+-
+diff --git a/tests/combine_maps.py b/tests/combine_maps.py
+index b0fb850c5..112433e4f 100644
+--- a/tests/combine_maps.py
++++ b/tests/combine_maps.py
+@@ -27,11 +27,142 @@ More generally, we can correctly construct x->z from x->y' and y"->z as long as
+ y">y'.
+ 
+ This file contains the implementation of combining two mapping files.
++
++The optional --checked-revision argument applies a narrowly checked, in-memory
++revision to a named top-half typeattributeset before combining. It never writes
++to either input file and is absent by default, so the ordinary combine path and
++its output are unchanged.
+ """
+ import argparse
++import json
+ import re
+ from mini_parser import MiniCilParser
+ 
++
++class CheckedRevisionError(ValueError):
++    """A checked top-half revision is malformed or does not match the input."""
++
++
++def _parse_member_list(value, field):
++    if not isinstance(value, list):
++        raise CheckedRevisionError("%s must be a JSON array of strings" % field)
++
++    members = []
++    seen = set()
++    for member in value:
++        if not isinstance(member, str) or not member:
++            raise CheckedRevisionError(
++                "%s must contain only non-empty strings" % field)
++        if member in seen:
++            raise CheckedRevisionError(
++                "%s contains duplicate member %r" % (field, member))
++        seen.add(member)
++        members.append(member)
++    return members
++
++
++def _reject_duplicate_json_fields(pairs):
++    payload = {}
++    for key, value in pairs:
++        if key in payload:
++            raise CheckedRevisionError(
++                "revision has duplicate JSON field %r" % key)
++        payload[key] = value
++    return payload
++
++
++def parse_checked_revision(text):
++    """Parses and structurally validates one JSON-encoded checked revision."""
++    try:
++        payload = json.loads(text,
++                             object_pairs_hook=_reject_duplicate_json_fields)
++    except CheckedRevisionError:
++        raise
++    except (TypeError, ValueError) as e:
++        raise CheckedRevisionError("revision is not valid JSON: %s" % e)
++
++    if not isinstance(payload, dict):
++        raise CheckedRevisionError("revision must be a JSON object")
++
++    required = {"selector", "expected_members", "remove_members"}
++    missing = required - set(payload)
++    extra = set(payload) - required
++    if missing:
++        raise CheckedRevisionError(
++            "revision is missing field(s): %s" % ", ".join(sorted(missing)))
++    if extra:
++        raise CheckedRevisionError(
++            "revision has unknown field(s): %s" % ", ".join(sorted(extra)))
++
++    selector = payload["selector"]
++    if not isinstance(selector, str) or not selector:
++        raise CheckedRevisionError("selector must be a non-empty string")
++
++    expected = _parse_member_list(payload["expected_members"],
++                                  "expected_members")
++    remove = _parse_member_list(payload["remove_members"], "remove_members")
++    if not expected:
++        raise CheckedRevisionError("expected_members must not be empty")
++    if not remove:
++        raise CheckedRevisionError("remove_members must not be empty")
++
++    expected_set = set(expected)
++    for member in remove:
++        if member not in expected_set:
++            raise CheckedRevisionError(
++                "remove member %r is not in expected_members" % member)
++    if len(remove) == len(expected_set):
++        raise CheckedRevisionError(
++            "remove_members must leave at least one expected member")
++
++    return {
++        "selector": selector,
++        "expected_members": expected,
++        "remove_members": remove,
++    }
++
++
++def apply_checked_revisions(top, revisions):
++    """Applies checked revisions to a parsed top map in memory.
++
++    All revisions are validated before any set is changed, so a rejected
++    revision leaves the parsed top map untouched. The revision is intentionally
++    limited to replacing members of an existing typeattributeset; types,
++    typeattributes, expandtypeattribute forms and every unrelated selector are
++    left alone.
++    """
++    if not revisions:
++        return top
++
++    seen = set()
++    for revision in revisions:
++        selector = revision["selector"]
++        if selector in seen:
++            raise CheckedRevisionError(
++                "duplicate revision selector %r" % selector)
++        seen.add(selector)
++
++        if selector not in top.typeattributesets:
++            raise CheckedRevisionError(
++                "selector %r is not a typeattributeset in the top half"
++                % selector)
++
++        actual = set(top.typeattributesets[selector])
++        expected = set(revision["expected_members"])
++        if actual != expected:
++            raise CheckedRevisionError(
++                "selector %r expected members %s, actual members %s"
++                % (selector, sorted(expected), sorted(actual)))
++
++    for revision in revisions:
++        new_members = (set(revision["expected_members"]) -
++                       set(revision["remove_members"]))
++        # parse_checked_revision guarantees this is a non-empty proper subset.
++        top.typeattributesets[revision["selector"]] = new_members
++
++    return top
++
++
+ def Combine(top, bottom):
+     bottom.types.update(top.types)
+     bottom.typeattributes.update(top.typeattributes)
+@@ -64,10 +195,21 @@ if __name__ == "__main__":
+                         required=True, help="bottom map file")
+     parser.add_argument("-o", "--output-file", dest="output_file",
+                         required=True, help="output map file")
++    parser.add_argument("--checked-revision", dest="checked_revisions",
++                        action="append", default=[], metavar="JSON",
++                        help="repeatable JSON checked revision of a top-half "
++                             "typeattributeset; absent by default")
+     args = parser.parse_args()
+ 
+-    top_map_cil = MiniCilParser(args.top_map)
+-    bottom_map_cil = MiniCilParser(args.bottom_map)
++    try:
++        revisions = [parse_checked_revision(text)
++                     for text in args.checked_revisions]
++        top_map_cil = MiniCilParser(args.top_map)
++        bottom_map_cil = MiniCilParser(args.bottom_map)
++        apply_checked_revisions(top_map_cil, revisions)
++    except CheckedRevisionError as e:
++        parser.error(str(e))
++
+     result = Combine(top_map_cil, bottom_map_cil)
+ 
+     with open(args.output_file, "w") as output:
+diff --git a/tests/prototype_fixtures/bottom_202404.cil b/tests/prototype_fixtures/bottom_202404.cil
+new file mode 100644
+index 000000000..f40bc929e
+--- /dev/null
++++ b/tests/prototype_fixtures/bottom_202404.cil
+@@ -0,0 +1,14 @@
++; Fixture-only 202404 bottom used to show an independent 202404 composition
++; remains unchanged. It keeps both members in each virtual HAL selector.
++(type virtual_face_hal_prop)
++(type virtual_face_prop)
++(type virtual_fingerprint_hal_prop)
++(type virtual_fingerprint_prop)
++(typeattribute virtual_face_hal_prop_202404)
++(typeattribute virtual_fingerprint_hal_prop_202404)
++(typeattribute unrelated_shared_202404)
++(typeattributeset virtual_face_hal_prop_202404 (virtual_face_hal_prop virtual_face_prop))
++(typeattributeset virtual_fingerprint_hal_prop_202404 (virtual_fingerprint_hal_prop virtual_fingerprint_prop))
++(typeattributeset unrelated_shared_202404 (unrelated_shared_a unrelated_shared_b))
++(expandtypeattribute (virtual_face_hal_prop_202404) true)
++(expandtypeattribute (virtual_fingerprint_hal_prop_202404) true)
+diff --git a/tests/prototype_fixtures/bottom_33.cil b/tests/prototype_fixtures/bottom_33.cil
+new file mode 100644
+index 000000000..be03e0a8d
+--- /dev/null
++++ b/tests/prototype_fixtures/bottom_33.cil
+@@ -0,0 +1,10 @@
++; Fixture-only 33 bottom used to show the downstream member delta that the
++; revised 34 composition would explain. This is not an actual 33 test.
++(typeattribute virtual_face_hal_prop_33_0)
++(typeattribute virtual_fingerprint_hal_prop_33_0)
++(typeattribute unrelated_shared_33_0)
++(typeattributeset virtual_face_hal_prop_33_0 (virtual_face_hal_prop))
++(typeattributeset virtual_fingerprint_hal_prop_33_0 (virtual_fingerprint_hal_prop))
++(typeattributeset unrelated_shared_33_0 (unrelated_shared_a))
++(expandtypeattribute (virtual_face_hal_prop_33_0) true)
++(expandtypeattribute (virtual_fingerprint_hal_prop_33_0) true)
+diff --git a/tests/prototype_fixtures/bottom_34.cil b/tests/prototype_fixtures/bottom_34.cil
+new file mode 100644
+index 000000000..2e1379931
+--- /dev/null
++++ b/tests/prototype_fixtures/bottom_34.cil
+@@ -0,0 +1,12 @@
++; Fixture-only shape mirroring the 34 bottom half. Its virtual HAL selectors
++; are already singletons containing only the old HAL property.
++(type virtual_face_hal_prop)
++(type virtual_fingerprint_hal_prop)
++(typeattribute virtual_face_hal_prop_34_0)
++(typeattribute virtual_fingerprint_hal_prop_34_0)
++(typeattribute unrelated_shared_34_0)
++(typeattributeset virtual_face_hal_prop_34_0 (virtual_face_hal_prop))
++(typeattributeset virtual_fingerprint_hal_prop_34_0 (virtual_fingerprint_hal_prop))
++(typeattributeset unrelated_shared_34_0 (unrelated_shared_a))
++(expandtypeattribute (virtual_face_hal_prop_34_0) true)
++(expandtypeattribute (virtual_fingerprint_hal_prop_34_0) true)
+diff --git a/tests/prototype_fixtures/goldens.json b/tests/prototype_fixtures/goldens.json
+new file mode 100644
+index 000000000..b7a9009d9
+--- /dev/null
++++ b/tests/prototype_fixtures/goldens.json
+@@ -0,0 +1,20 @@
++{
++  "fixtures": {
++    "202404": {
++      "bottom": "tests/prototype_fixtures/bottom_202404.cil",
++      "cli_bytes": 734,
++      "cli_sha256": "638f8c81af11c1502803a308526c9d2e06e68db853d797dbf9dc4e31de34299d",
++      "unparse_bytes": 734,
++      "unparse_sha256": "638f8c81af11c1502803a308526c9d2e06e68db853d797dbf9dc4e31de34299d"
++    },
++    "34": {
++      "bottom": "tests/prototype_fixtures/bottom_34.cil",
++      "cli_bytes": 836,
++      "cli_sha256": "ed84982b507ab3313856a62c16c586d252eab3e429916f2096e12c652d65b5c8",
++      "unparse_bytes": 836,
++      "unparse_sha256": "ed84982b507ab3313856a62c16c586d252eab3e429916f2096e12c652d65b5c8"
++    }
++  },
++  "format": "f06-checked-top-revision-goldens-v1",
++  "note": "Frozen default no-revision goldens for the staged production combine_maps.py; no baseline_combine_maps.py copy is used."
++}
+diff --git a/tests/prototype_fixtures/top_202404.cil b/tests/prototype_fixtures/top_202404.cil
+new file mode 100644
+index 000000000..092227756
+--- /dev/null
++++ b/tests/prototype_fixtures/top_202404.cil
+@@ -0,0 +1,19 @@
++; Fixture-only shape mirroring the shared 202404 top used by plat_34.0.cil.
++; The two virtual HAL selectors contain two members: the old HAL property and
++; the new system-owned property. No production bytes are copied or claimed.
++(type virtual_face_hal_prop)
++(type virtual_face_prop)
++(type virtual_fingerprint_hal_prop)
++(type virtual_fingerprint_prop)
++(type unrelated_top_type)
++(typeattribute virtual_face_hal_prop_202404)
++(typeattribute virtual_fingerprint_hal_prop_202404)
++(typeattribute unrelated_shared_202404)
++(typeattribute unrelated_top_only_202404)
++(typeattributeset virtual_face_hal_prop_202404 (virtual_face_hal_prop virtual_face_prop))
++(typeattributeset virtual_fingerprint_hal_prop_202404 (virtual_fingerprint_hal_prop virtual_fingerprint_prop))
++(typeattributeset unrelated_shared_202404 (unrelated_shared_a unrelated_shared_b))
++(typeattributeset unrelated_top_only_202404 (unrelated_top_type))
++(expandtypeattribute (virtual_face_hal_prop_202404) true)
++(expandtypeattribute (virtual_fingerprint_hal_prop_202404) true)
++(expandtypeattribute (unrelated_shared_202404) true)
+diff --git a/tests/test_checked_top_revision.py b/tests/test_checked_top_revision.py
+new file mode 100644
+index 000000000..db07ba2a1
+--- /dev/null
++++ b/tests/test_checked_top_revision.py
+@@ -0,0 +1,402 @@
++#!/usr/bin/env python3
++"""Focused tests for the F06 checked top-half revision prototype.
++
++These tests use only fixture .cil maps and local Python. They do not build or
++run Soong/Ninja, do not invoke the native policy pipeline and do not exercise
++any production mapping.
++"""
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import tempfile
++import unittest
++
++TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
++FIXTURES = os.path.join(TESTS_DIR, "prototype_fixtures")
++PROTOTYPE = os.path.join(TESTS_DIR, "combine_maps.py")
++
++if TESTS_DIR not in sys.path:
++    sys.path.insert(0, TESTS_DIR)
++
++import combine_maps as proto  # noqa: E402
++
++GOLDENS = json.load(open(os.path.join(FIXTURES, "goldens.json")))
++TOP = os.path.join(FIXTURES, "top_202404.cil")
++BOTTOM_34 = os.path.join(FIXTURES, "bottom_34.cil")
++BOTTOM_202404 = os.path.join(FIXTURES, "bottom_202404.cil")
++BOTTOM_33 = os.path.join(FIXTURES, "bottom_33.cil")
++
++FACE = {
++    "selector": "virtual_face_hal_prop_202404",
++    "expected_members": ["virtual_face_hal_prop", "virtual_face_prop"],
++    "remove_members": ["virtual_face_prop"],
++}
++FINGERPRINT = {
++    "selector": "virtual_fingerprint_hal_prop_202404",
++    "expected_members": [
++        "virtual_fingerprint_hal_prop",
++        "virtual_fingerprint_prop",
++    ],
++    "remove_members": ["virtual_fingerprint_prop"],
++}
++
++
++def encoded(revision):
++    return json.dumps(revision, separators=(",", ":"))
++
++
++def run_cli(script, top, bottom, out, revisions=()):
++    env = os.environ.copy()
++    env["PYTHONPATH"] = TESTS_DIR
++    cmd = [sys.executable, script, "-t", top, "-b", bottom, "-o", out]
++    for revision in revisions:
++        cmd.extend(["--checked-revision", encoded(revision)])
++    return subprocess.run(cmd, cwd=TESTS_DIR, env=env, text=True,
++                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
++
++
++def sha256(path):
++    with open(path, "rb") as f:
++        return hashlib.sha256(f.read()).hexdigest()
++
++
++def parse(path):
++    return proto.MiniCilParser(path)
++
++
++class CheckedTopRevisionTest(unittest.TestCase):
++
++    def test_fixture_has_actual_two_member_shape_and_baseline_output(self):
++        top = parse(TOP)
++        self.assertEqual(
++            top.typeattributesets["virtual_face_hal_prop_202404"],
++            {"virtual_face_hal_prop", "virtual_face_prop"})
++        self.assertEqual(
++            top.typeattributesets["virtual_fingerprint_hal_prop_202404"],
++            {"virtual_fingerprint_hal_prop", "virtual_fingerprint_prop"})
++
++        combined = proto.Combine(parse(TOP), parse(BOTTOM_34))
++        self.assertEqual(
++            combined.typeattributesets["virtual_face_hal_prop_34_0"],
++            {"virtual_face_hal_prop", "virtual_face_prop"})
++        self.assertEqual(
++            combined.typeattributesets["virtual_fingerprint_hal_prop_34_0"],
++            {"virtual_fingerprint_hal_prop", "virtual_fingerprint_prop"})
++
++    def test_no_revision_cli_matches_frozen_golden(self):
++        with tempfile.TemporaryDirectory(prefix="f06-checked-revision-") as d:
++            for label, bottom in (("34", BOTTOM_34),
++                                  ("202404", BOTTOM_202404)):
++                with self.subTest(label=label):
++                    out = os.path.join(d, "proto-%s.cil" % label)
++                    prot = run_cli(PROTOTYPE, TOP, bottom, out)
++                    self.assertEqual(prot.returncode, 0, prot.stderr)
++                    with open(out, "rb") as f:
++                        actual = f.read()
++                    golden = GOLDENS["fixtures"][label]
++                    self.assertEqual(len(actual), golden["cli_bytes"])
++                    self.assertEqual(hashlib.sha256(actual).hexdigest(),
++                                     golden["cli_sha256"])
++
++    def test_default_direct_combine_matches_frozen_golden(self):
++        for label, bottom in (("34", BOTTOM_34),
++                              ("202404", BOTTOM_202404)):
++            with self.subTest(label=label):
++                actual = proto.Combine(parse(TOP), parse(bottom)).unparse()
++                golden = GOLDENS["fixtures"][label]
++                self.assertEqual(len(actual.encode()), golden["unparse_bytes"])
++                self.assertEqual(hashlib.sha256(actual.encode()).hexdigest(),
++                                 golden["unparse_sha256"])
++
++    def test_checked_revision_removes_exactly_planned_members(self):
++        with tempfile.TemporaryDirectory(prefix="f06-checked-revision-") as d:
++            out = os.path.join(d, "out.cil")
++            result = run_cli(PROTOTYPE, TOP, BOTTOM_34, out,
++                             revisions=[FACE, FINGERPRINT])
++            self.assertEqual(result.returncode, 0, result.stderr)
++            combined = parse(out)
++            self.assertEqual(
++                combined.typeattributesets["virtual_face_hal_prop_34_0"],
++                {"virtual_face_hal_prop"})
++            self.assertEqual(
++                combined.typeattributesets["virtual_fingerprint_hal_prop_34_0"],
++                {"virtual_fingerprint_hal_prop"})
++            # Ordinary Combine semantics still copy types and unrelated members.
++            self.assertIn("virtual_face_prop", combined.types)
++            self.assertIn("virtual_fingerprint_prop", combined.types)
++            self.assertEqual(
++                combined.typeattributesets["unrelated_shared_34_0"],
++                {"unrelated_shared_a"})
++
++    def test_top_input_file_unchanged(self):
++        before_top = sha256(TOP)
++        before_bottom = sha256(BOTTOM_34)
++        with tempfile.TemporaryDirectory(prefix="f06-checked-revision-") as d:
++            out = os.path.join(d, "out.cil")
++            result = run_cli(PROTOTYPE, TOP, BOTTOM_34, out,
++                             revisions=[FACE, FINGERPRINT])
++            self.assertEqual(result.returncode, 0, result.stderr)
++            self.assertTrue(os.path.exists(out))
++        self.assertEqual(before_top, sha256(TOP))
++        self.assertEqual(before_bottom, sha256(BOTTOM_34))
++
++    def assert_revision_rejected(self, revision, expected_text,
++                                 rc_expected=2):
++        with tempfile.TemporaryDirectory(prefix="f06-checked-revision-") as d:
++            out = os.path.join(d, "out.cil")
++            result = run_cli(PROTOTYPE, TOP, BOTTOM_34, out,
++                             revisions=[revision])
++            self.assertEqual(result.returncode, rc_expected,
++                             result.stdout + result.stderr)
++            self.assertIn(expected_text, result.stderr)
++            self.assertFalse(os.path.exists(out))
++        return result
++
++    def test_expected_members_mismatch_rejected(self):
++        self.assert_revision_rejected(
++            {
++                "selector": "virtual_face_hal_prop_202404",
++                "expected_members": ["virtual_face_hal_prop",
++                                     "not_the_actual_member"],
++                "remove_members": ["not_the_actual_member"],
++            },
++            "expected members")
++
++    def test_missing_selector_rejected(self):
++        self.assert_revision_rejected(
++            {
++                "selector": "virtual_face_hal_prop_404404",
++                "expected_members": ["virtual_face_hal_prop",
++                                     "virtual_face_prop"],
++                "remove_members": ["virtual_face_prop"],
++            },
++            "not a typeattributeset")
++
++    def test_remove_all_rejected(self):
++        self.assert_revision_rejected(
++            {
++                "selector": "virtual_face_hal_prop_202404",
++                "expected_members": ["virtual_face_hal_prop",
++                                     "virtual_face_prop"],
++                "remove_members": ["virtual_face_hal_prop",
++                                   "virtual_face_prop"],
++            },
++            "must leave at least one")
++
++    def test_unexpected_type_rejected(self):
++        cases = [
++            {
++                "selector": "virtual_face_hal_prop_202404",
++                "expected_members": "virtual_face_hal_prop",
++                "remove_members": ["virtual_face_prop"],
++            },
++            {
++                "selector": "virtual_face_hal_prop_202404",
++                "expected_members": ["virtual_face_hal_prop",
++                                     "virtual_face_prop"],
++                "remove_members": 7,
++            },
++            {
++                "selector": 202404,
++                "expected_members": ["virtual_face_hal_prop"],
++                "remove_members": ["virtual_face_hal_prop"],
++            },
++        ]
++        for revision in cases:
++            with self.subTest(revision=revision):
++                self.assert_revision_rejected(revision, "must")
++
++    def test_duplicate_members_rejected(self):
++        cases = [
++            {
++                "selector": "virtual_face_hal_prop_202404",
++                "expected_members": ["virtual_face_hal_prop",
++                                     "virtual_face_hal_prop"],
++                "remove_members": ["virtual_face_hal_prop"],
++            },
++            {
++                "selector": "virtual_face_hal_prop_202404",
++                "expected_members": ["virtual_face_hal_prop",
++                                     "virtual_face_prop"],
++                "remove_members": ["virtual_face_prop",
++                                   "virtual_face_prop"],
++            },
++        ]
++        for revision in cases:
++            with self.subTest(revision=revision):
++                self.assert_revision_rejected(revision, "duplicate member")
++
++    def test_duplicate_selector_rejected(self):
++        with tempfile.TemporaryDirectory(prefix="f06-checked-revision-") as d:
++            out = os.path.join(d, "out.cil")
++            result = run_cli(PROTOTYPE, TOP, BOTTOM_34, out,
++                             revisions=[FACE, FACE])
++            self.assertEqual(result.returncode, 2, result.stderr)
++            self.assertIn("duplicate revision selector", result.stderr)
++            self.assertFalse(os.path.exists(out))
++
++    def test_unknown_remove_member_rejected(self):
++        self.assert_revision_rejected(
++            {
++                "selector": "virtual_face_hal_prop_202404",
++                "expected_members": ["virtual_face_hal_prop",
++                                     "virtual_face_prop"],
++                "remove_members": ["not_a_member"],
++            },
++            "not in expected_members")
++
++    def test_bad_json_rejected(self):
++        with tempfile.TemporaryDirectory(prefix="f06-checked-revision-") as d:
++            out = os.path.join(d, "out.cil")
++            result = subprocess.run(
++                [sys.executable, PROTOTYPE, "-t", TOP, "-b", BOTTOM_34,
++                 "-o", out, "--checked-revision", "{not json"],
++                cwd=TESTS_DIR, text=True, stdout=subprocess.PIPE,
++                stderr=subprocess.PIPE)
++            self.assertEqual(result.returncode, 2, result.stderr)
++            self.assertIn("not valid JSON", result.stderr)
++            self.assertFalse(os.path.exists(out))
++
++    def test_malformed_payload_rejected(self):
++        payloads = [
++            ("[]", "must be a JSON object"),
++            ('{"selector":"virtual_face_hal_prop_202404",'
++             '"expected_members":["virtual_face_hal_prop"]}',
++             "missing field"),
++            ('{"selector":"virtual_face_hal_prop_202404",'
++             '"expected_members":["virtual_face_hal_prop"],'
++             '"remove_members":["virtual_face_hal_prop"],"extra":true}',
++             "unknown field"),
++            ('{"selector":"virtual_face_hal_prop_202404",'
++             '"selector":"virtual_fingerprint_hal_prop_202404",'
++             '"expected_members":["virtual_face_hal_prop",'
++             '"virtual_face_prop"],'
++             '"remove_members":["virtual_face_prop"]}',
++             "duplicate JSON field"),
++            ('{"selector":"virtual_face_hal_prop_202404",'
++             '"expected_members":[],"remove_members":["x"]}',
++             "expected_members must not be empty"),
++            ('{"selector":"virtual_face_hal_prop_202404",'
++             '"expected_members":["x"],"remove_members":[]}',
++             "remove_members must not be empty"),
++        ]
++        for payload, expected_text in payloads:
++            with self.subTest(payload=payload):
++                with tempfile.TemporaryDirectory(
++                        prefix="f06-checked-revision-") as d:
++                    out = os.path.join(d, "out.cil")
++                    result = subprocess.run(
++                        [sys.executable, PROTOTYPE, "-t", TOP, "-b",
++                         BOTTOM_34, "-o", out,
++                         "--checked-revision", payload],
++                        cwd=TESTS_DIR, text=True, stdout=subprocess.PIPE,
++                        stderr=subprocess.PIPE)
++                    self.assertEqual(result.returncode, 2, result.stderr)
++                    self.assertIn(expected_text, result.stderr)
++                    self.assertFalse(os.path.exists(out))
++
++    def test_unrelated_selectors_and_types_unchanged(self):
++        top = parse(TOP)
++        baseline_sets = {k: set(v) for k, v in
++                         top.typeattributesets.items()}
++        baseline_types = set(top.types)
++        baseline_attrs = set(top.typeattributes)
++        baseline_expand = dict(top.expandtypeattributes)
++
++        proto.apply_checked_revisions(
++            top, [proto.parse_checked_revision(encoded(FACE)),
++                  proto.parse_checked_revision(encoded(FINGERPRINT))])
++
++        self.assertEqual(top.types, baseline_types)
++        self.assertEqual(top.typeattributes, baseline_attrs)
++        self.assertEqual(top.expandtypeattributes, baseline_expand)
++        self.assertEqual(top.typeattributesets["unrelated_shared_202404"],
++                         baseline_sets["unrelated_shared_202404"])
++        self.assertEqual(top.typeattributesets["unrelated_top_only_202404"],
++                         baseline_sets["unrelated_top_only_202404"])
++        self.assertEqual(top.typeattributesets["virtual_face_hal_prop_202404"],
++                         {"virtual_face_hal_prop"})
++        self.assertEqual(
++            top.typeattributesets["virtual_fingerprint_hal_prop_202404"],
++            {"virtual_fingerprint_hal_prop"})
++
++    def test_independent_202404_output_unchanged(self):
++        with tempfile.TemporaryDirectory(prefix="f06-checked-revision-") as d:
++            proto_out = os.path.join(d, "proto-202404.cil")
++            prot = run_cli(PROTOTYPE, TOP, BOTTOM_202404, proto_out)
++            self.assertEqual(prot.returncode, 0, prot.stderr)
++            with open(proto_out, "rb") as f:
++                actual = f.read()
++            golden = GOLDENS["fixtures"]["202404"]
++            self.assertEqual(len(actual), golden["cli_bytes"])
++            self.assertEqual(hashlib.sha256(actual).hexdigest(),
++                             golden["cli_sha256"])
++
++            combined = parse(proto_out)
++            self.assertEqual(
++                combined.typeattributesets["virtual_face_hal_prop_202404"],
++                {"virtual_face_hal_prop", "virtual_face_prop"})
++            self.assertEqual(
++                combined.typeattributesets[
++                    "virtual_fingerprint_hal_prop_202404"],
++                {"virtual_fingerprint_hal_prop",
++                 "virtual_fingerprint_prop"})
++
++    def test_downstream_33_fixture_explained_member_delta(self):
++        base34 = proto.Combine(parse(TOP), parse(BOTTOM_34))
++        base33 = proto.Combine(base34, parse(BOTTOM_33))
++
++        revised_top = proto.apply_checked_revisions(
++            parse(TOP), [proto.parse_checked_revision(encoded(FACE)),
++                         proto.parse_checked_revision(encoded(FINGERPRINT))])
++        revised34 = proto.Combine(revised_top, parse(BOTTOM_34))
++        revised33 = proto.Combine(revised34, parse(BOTTOM_33))
++
++        self.assertEqual(
++            base33.typeattributesets["virtual_face_hal_prop_33_0"],
++            {"virtual_face_hal_prop", "virtual_face_prop"})
++        self.assertEqual(
++            base33.typeattributesets["virtual_fingerprint_hal_prop_33_0"],
++            {"virtual_fingerprint_hal_prop", "virtual_fingerprint_prop"})
++        self.assertEqual(
++            revised33.typeattributesets["virtual_face_hal_prop_33_0"],
++            {"virtual_face_hal_prop"})
++        self.assertEqual(
++            revised33.typeattributesets["virtual_fingerprint_hal_prop_33_0"],
++            {"virtual_fingerprint_hal_prop"})
++
++        changed = set()
++        for selector in set(base33.typeattributesets) | \
++                set(revised33.typeattributesets):
++            if (base33.typeattributesets.get(selector) !=
++                    revised33.typeattributesets.get(selector)):
++                changed.add(selector)
++        self.assertEqual(changed, {
++            "virtual_face_hal_prop_33_0",
++            "virtual_fingerprint_hal_prop_33_0",
++        })
++        self.assertEqual(base33.types, revised33.types)
++        self.assertEqual(base33.typeattributes, revised33.typeattributes)
++
++    def test_failed_revision_leaves_in_memory_top_unmodified(self):
++        bad = proto.parse_checked_revision(encoded({
++            "selector": "virtual_face_hal_prop_202404",
++            "expected_members": ["virtual_face_hal_prop",
++                                 "not_the_actual_member"],
++            "remove_members": ["not_the_actual_member"],
++        }))
++        good = proto.parse_checked_revision(encoded(FINGERPRINT))
++        for revisions in ([bad], [good, bad]):
++            with self.subTest(revisions=len(revisions)):
++                top = parse(TOP)
++                before = {k: set(v) for k, v in
++                          top.typeattributesets.items()}
++                with self.assertRaises(proto.CheckedRevisionError):
++                    proto.apply_checked_revisions(top, revisions)
++                self.assertEqual(top.typeattributesets, before)
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)

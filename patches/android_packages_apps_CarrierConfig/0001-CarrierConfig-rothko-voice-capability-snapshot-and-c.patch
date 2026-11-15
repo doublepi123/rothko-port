@@ -1,0 +1,404 @@
+From 57345a173e226d427a6eedbd5ba14a64a5a66613 Mon Sep 17 00:00:00 2001
+From: lcy <admin@luchenyang.xyz>
+Date: Sun, 15 Nov 2026 10:05:26 +0800
+Subject: [PATCH] CarrierConfig: rothko voice capability snapshot and checked
+ dump
+
+Publishes the vendor carrier voice capability snapshot used by the rothko
+IMS integration and adds a permission-checked dump of it (DUMP required for
+remote callers).
+---
+ AndroidManifest.xml                           |   4 +-
+ .../DefaultCarrierConfigService.java          | 258 +++++++++++++++++-
+ 2 files changed, 255 insertions(+), 7 deletions(-)
+
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+index cd03659..9e34369 100644
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -15,8 +15,8 @@
+ -->
+ 
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+-     android:versionCode="1"
+-     android:versionName="1.0.0"
++     android:versionCode="2"
++     android:versionName="1.0.1"
+      package="com.android.carrierconfig">
+ 
+     <uses-permission android:name="android.permission.READ_PRIVILEGED_PHONE_STATE"/>
+diff --git a/src/com/android/carrierconfig/DefaultCarrierConfigService.java b/src/com/android/carrierconfig/DefaultCarrierConfigService.java
+index 768271f..5c6bd46 100644
+--- a/src/com/android/carrierconfig/DefaultCarrierConfigService.java
++++ b/src/com/android/carrierconfig/DefaultCarrierConfigService.java
+@@ -16,10 +16,14 @@
+ 
+ package com.android.carrierconfig;
+ 
++import android.Manifest;
+ import android.annotation.Nullable;
+ import android.content.Context;
++import android.content.pm.PackageManager;
++import android.os.Binder;
+ import android.os.Build;
+ import android.os.PersistableBundle;
++import android.os.Process;
+ import android.os.SystemProperties;
+ import android.service.carrier.CarrierIdentifier;
+ import android.service.carrier.CarrierService;
+@@ -31,7 +35,10 @@ import org.xmlpull.v1.XmlPullParser;
+ import org.xmlpull.v1.XmlPullParserException;
+ import org.xmlpull.v1.XmlPullParserFactory;
+ 
++import java.io.FileDescriptor;
+ import java.io.IOException;
++import java.io.PrintWriter;
++import java.util.concurrent.atomic.AtomicInteger;
+ import java.util.regex.Matcher;
+ import java.util.regex.Pattern;
+ 
+@@ -59,6 +66,163 @@ public class DefaultCarrierConfigService extends CarrierService {
+ 
+     private XmlPullParserFactory mFactory;
+ 
++    /*
++     * Read-only, per-process diagnostics for the last completed carrier config load.
++     *
++     * This is observability only. It never takes part in selection, parsing, merging,
++     * logging, or the returned bundle. The trace object is local to one call; the
++     * published snapshot keeps only fixed enums, booleans and counts. It never retains
++     * the CarrierIdentifier, MCC/MNC/SPN/IMSI/ICCID/subId, asset file names, profile
++     * hashes, package names or any bundle key other than the three fixed public keys
++     * below.
++     *
++     * route semantics:
++     *   SPECIFIC / CARRIER / MCCMNC_FALLBACK - that bundle was actually non-empty and
++     *       selected by the original priority chain.
++     *   MCCMNC - the MCC/MNC XML was the final attempted source. This also covers an
++     *       attempt that failed with IO/XML or produced an empty bundle, because no
++     *       bundle was selected; the parseOutcome field distinguishes that case.
++     *   NONE - no bundle was selected. This covers the carrier-id loop aborting (for
++     *       example an IO error while opening an asset) before any selection, and a
++     *       parser factory failure before the selection stage was reached.
++     *   NO_SIM - the identifier was null.
++     *
++     * loadAttempt is the process-wide saturating count of attempts started, read when
++     * the snapshot is published. Publication is serialized by a small private lock, so
++     * an older call finishing after a newer call cannot make the published count go
++     * backwards. It is not a per-call ordinal and not a request id; repeated values are
++     * expected. The dump path stays a single volatile load with no lock.
++     *
++     * The snapshot lives in this app process. If the CarrierService is unbound or
++     * destroyed, ActivityManager cannot route a dump to it and dumpsys reports no
++     * matching service; the static snapshot is retained as process-local evidence
++     * only. This code never binds, starts, rebinds or refetches the service to expose
++     * a snapshot, and prints "UNAVAILABLE no-completed-load" when a live instance has
++     * no completed load yet.
++     */
++    private static final String DIAG_PREFIX = "CarrierConfigDiag/1";
++    private static final String KEY_VOLTE_AVAILABLE = "carrier_volte_available_bool";
++    private static final String KEY_IMS_GBA_REQUIRED = "carrier_ims_gba_required_bool";
++    private static final String KEY_VOLTE_PROVISIONING_REQUIRED =
++            "carrier_volte_provisioning_required_bool";
++
++    private static final AtomicInteger sLoadAttempts = new AtomicInteger();
++    private static final Object sPublishLock = new Object();
++    private static volatile DiagSnapshot sLastCompletedSnapshot;
++
++    private enum DiagRoute {
++        SPECIFIC, CARRIER, MCCMNC_FALLBACK, MCCMNC, NONE, NO_SIM
++    }
++
++    private enum DiagParseOutcome {
++        OK, IO, XML, UNKNOWN
++    }
++
++    private enum DiagTriState {
++        ABSENT, TRUE, FALSE, PRESENT_UNPARSED
++    }
++
++    private static final class DiagTrace {
++        final boolean idPresent;
++        DiagRoute route = DiagRoute.NONE;
++        DiagParseOutcome outcome = DiagParseOutcome.UNKNOWN;
++
++        DiagTrace(boolean idPresent) {
++            this.idPresent = idPresent;
++            // Counts the attempt; the published snapshot reads the counter at publish time.
++            nextLoadAttempt();
++        }
++
++        void noteReadOk() {
++            // Keep the first failure: a later successful vendor read must not erase it.
++            if (outcome == DiagParseOutcome.UNKNOWN) {
++                outcome = DiagParseOutcome.OK;
++            }
++        }
++
++        void noteFailure(DiagParseOutcome failure) {
++            if (outcome == DiagParseOutcome.UNKNOWN || outcome == DiagParseOutcome.OK) {
++                outcome = failure;
++            }
++        }
++    }
++
++    private static final class DiagSnapshot {
++        final int loadAttempt;
++        final boolean idPresent;
++        final DiagRoute route;
++        final DiagParseOutcome parseOutcome;
++        final int resultKeyCount;
++        final DiagTriState carrierVolteAvailable;
++        final DiagTriState carrierImsGbaRequired;
++        final DiagTriState carrierVolteProvisioningRequired;
++
++        DiagSnapshot(int loadAttempt, boolean idPresent, DiagRoute route,
++                DiagParseOutcome parseOutcome, int resultKeyCount,
++                DiagTriState carrierVolteAvailable, DiagTriState carrierImsGbaRequired,
++                DiagTriState carrierVolteProvisioningRequired) {
++            this.loadAttempt = loadAttempt;
++            this.idPresent = idPresent;
++            this.route = route;
++            this.parseOutcome = parseOutcome;
++            this.resultKeyCount = resultKeyCount;
++            this.carrierVolteAvailable = carrierVolteAvailable;
++            this.carrierImsGbaRequired = carrierImsGbaRequired;
++            this.carrierVolteProvisioningRequired = carrierVolteProvisioningRequired;
++        }
++
++        String toDumpLine() {
++            return DIAG_PREFIX
++                    + " attempt=" + loadAttempt
++                    + " idPresent=" + (idPresent ? 1 : 0)
++                    + " route=" + route
++                    + " outcome=" + parseOutcome
++                    + " keys=" + resultKeyCount
++                    + " " + KEY_VOLTE_AVAILABLE + "=" + triStateLabel(carrierVolteAvailable)
++                    + " " + KEY_IMS_GBA_REQUIRED + "=" + triStateLabel(carrierImsGbaRequired)
++                    + " " + KEY_VOLTE_PROVISIONING_REQUIRED
++                    + "=" + triStateLabel(carrierVolteProvisioningRequired);
++        }
++    }
++
++    private static int nextLoadAttempt() {
++        return sLoadAttempts.updateAndGet(
++                value -> value == Integer.MAX_VALUE ? value : value + 1);
++    }
++
++    private static DiagTriState triState(PersistableBundle config, String key) {
++        if (!config.containsKey(key)) {
++            return DiagTriState.ABSENT;
++        }
++        Object value = config.get(key);
++        if (value instanceof Boolean) {
++            return ((Boolean) value).booleanValue() ? DiagTriState.TRUE : DiagTriState.FALSE;
++        }
++        return DiagTriState.PRESENT_UNPARSED;
++    }
++
++    private static String triStateLabel(DiagTriState state) {
++        switch (state) {
++            case TRUE:
++                return "true";
++            case FALSE:
++                return "false";
++            default:
++                return state.name();
++        }
++    }
++
++    private static void publishSnapshot(DiagTrace trace, PersistableBundle config) {
++        synchronized (sPublishLock) {
++            final DiagSnapshot snapshot = new DiagSnapshot(sLoadAttempts.get(), trace.idPresent,
++                    trace.route, trace.outcome, config.size(),
++                    triState(config, KEY_VOLTE_AVAILABLE),
++                    triState(config, KEY_IMS_GBA_REQUIRED),
++                    triState(config, KEY_VOLTE_PROVISIONING_REQUIRED));
++            sLastCompletedSnapshot = snapshot;
++        }
++    }
++
+     public DefaultCarrierConfigService() {
+         Log.d(TAG, "Service created");
+         mFactory = null;
+@@ -90,6 +254,8 @@ public class DefaultCarrierConfigService extends CarrierService {
+     public PersistableBundle onLoadConfig(@Nullable CarrierIdentifier id) {
+         Log.d(TAG, "Config being fetched");
+ 
++        DiagTrace trace = new DiagTrace(id != null);
++
+         try {
+             synchronized (this) {
+                 if (mFactory == null) {
+@@ -99,33 +265,88 @@ public class DefaultCarrierConfigService extends CarrierService {
+ 
+             XmlPullParser parser = mFactory.newPullParser();
+ 
+-            return loadConfig(parser, id);
++            PersistableBundle config = loadConfig(parser, id, trace);
++            publishSnapshot(trace, config);
++            return config;
+         }
+         catch (XmlPullParserException e) {
++            trace.route = DiagRoute.NONE;
++            trace.noteFailure(DiagParseOutcome.XML);
+             Log.e(TAG, "Failed to load config", e);
+-            return new PersistableBundle();
++            PersistableBundle config = new PersistableBundle();
++            publishSnapshot(trace, config);
++            return config;
++        }
++    }
++
++    @Override
++    protected void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
++        // Reader boundary for both real dump transports:
++        //  - AMS dumpsys: doDump checks DUMP/usage-stats, then handleDumpService runs on
++        //    the app main thread where the binder identity is this app (self), so self is
++        //    allowed and the remote caller was already checked by AMS.
++        //  - Direct ICarrierService Binder.dump: DUMP_TRANSACTION runs on a binder thread,
++        //    identity is the real remote caller, and BIND_CARRIER_SERVICES alone is not
++        //    DUMP, so a remote caller must pass checkPermission(DUMP, pid, uid).
++        // A transfer or unbind does not grant any identity: every call is checked again.
++        final int callingPid = Binder.getCallingPid();
++        final int callingUid = Binder.getCallingUid();
++        if (callingUid != Process.myUid()
++                && checkPermission(Manifest.permission.DUMP, callingPid, callingUid)
++                        != PackageManager.PERMISSION_GRANTED) {
++            return;
++        }
++        // Preserve the existing Service.dump output ("nothing to dump"), then add one
++        // diag line. The diag output is only the CarrierConfigDiag-prefixed line.
++        super.dump(fd, pw, args);
++        DiagSnapshot snapshot = sLastCompletedSnapshot;
++        if (snapshot == null) {
++            pw.println(DIAG_PREFIX + " UNAVAILABLE no-completed-load");
++            return;
+         }
++        pw.println(snapshot.toDumpLine());
+     }
+ 
++    /**
++     * Test-visible entry point kept with its original signature and behaviour.
++     * Production goes through {@link #onLoadConfig(CarrierIdentifier)} and the
++     * three-argument overload, so a direct call counts as one load attempt.
++     */
+     PersistableBundle loadConfig(XmlPullParser parser, @Nullable CarrierIdentifier id) {
++        DiagTrace trace = new DiagTrace(id != null);
++        PersistableBundle config = loadConfig(parser, id, trace);
++        publishSnapshot(trace, config);
++        return config;
++    }
++
++    private PersistableBundle loadConfig(XmlPullParser parser, @Nullable CarrierIdentifier id,
++            DiagTrace trace) {
+         PersistableBundle config = new PersistableBundle();
+         // OEM customizable filter for carrier requirements not related to hardware/vendor SKU.
+         String sku = getApplicationContext().getResources().getString(R.string.sku_filter);
+ 
+         if (id == null) {
++            trace.route = DiagRoute.NO_SIM;
+             try {
+                 // Load no SIM config if carrier id is not set.
+                 parser.setInput(getApplicationContext().getAssets().open(
+                         NO_SIM_CONFIG_FILE_NAME), "utf-8");
+                 config = readConfigFromXml(parser, null, sku);
++                trace.noteReadOk();
+ 
+                 // Treat vendor_no_sim.xml as if it were appended to the no sim config file.
+                 XmlPullParser vendorInput =
+                         getApplicationContext().getResources().getXml(R.xml.vendor_no_sim);
+                 PersistableBundle vendorConfig = readConfigFromXml(vendorInput, null, sku);
++                trace.noteReadOk();
+                 config.putAll(vendorConfig);
+             }
+-            catch (IOException|XmlPullParserException e) {
++            catch (IOException e) {
++                trace.noteFailure(DiagParseOutcome.IO);
++                Log.e(TAG, "Failed to load config for no SIM", e);
++            }
++            catch (XmlPullParserException e) {
++                trace.noteFailure(DiagParseOutcome.XML);
+                 Log.e(TAG, "Failed to load config for no SIM", e);
+             }
+ 
+@@ -133,6 +354,9 @@ public class DefaultCarrierConfigService extends CarrierService {
+         }
+ 
+         try {
++            // Default: the carrier-id loop ran but may abort before any selection; the
++            // MCC/MNC fallback below overwrites this with MCCMNC when it is attempted.
++            trace.route = DiagRoute.NONE;
+             if (id.getCarrierId() != TelephonyManager.UNKNOWN_CARRIER_ID) {
+                 PersistableBundle configByCarrierId = new PersistableBundle();
+                 PersistableBundle configBySpecificCarrierId = new PersistableBundle();
+@@ -145,33 +369,51 @@ public class DefaultCarrierConfigService extends CarrierService {
+                     if (file.startsWith(CARRIER_ID_PREFIX + id.getSpecificCarrierId() + "_")) {
+                         parser.setInput(getApplicationContext().getAssets().open(file), "utf-8");
+                         configBySpecificCarrierId = readConfigFromXml(parser, null, sku);
++                        trace.noteReadOk();
+                         break;
+                     } else if (file.startsWith(CARRIER_ID_PREFIX + id.getCarrierId() + "_")) {
+                         parser.setInput(getApplicationContext().getAssets().open(file), "utf-8");
+                         configByCarrierId = readConfigFromXml(parser, null, sku);
++                        trace.noteReadOk();
+                     } else if (file.startsWith(CARRIER_ID_PREFIX + mccmncCarrierId + "_")) {
+                         parser.setInput(getApplicationContext().getAssets().open(file), "utf-8");
+                         configByMccMncFallBackCarrierId = readConfigFromXml(parser, null, sku);
++                        trace.noteReadOk();
+                     }
+                 }
+ 
+                 // priority: specific carrier id > carrier id > mccmnc fallback carrier id
++                // The route follows the bundle actually selected here, not the last
++                // loop iteration or parser input.
+                 if (!configBySpecificCarrierId.isEmpty()) {
+                     config = configBySpecificCarrierId;
++                    trace.route = DiagRoute.SPECIFIC;
+                 } else if (!configByCarrierId.isEmpty()) {
+                     config = configByCarrierId;
++                    trace.route = DiagRoute.CARRIER;
+                 } else if (!configByMccMncFallBackCarrierId.isEmpty()) {
+                     config = configByMccMncFallBackCarrierId;
++                    trace.route = DiagRoute.MCCMNC_FALLBACK;
+                 }
+             }
+             if (config.isEmpty()) {
+                 // fallback to use mccmnc.xml when there is no carrier id named config found.
++                // Record the attempt before opening so an IO/XML failure still routes MCCMNC.
++                trace.route = DiagRoute.MCCMNC;
+                 parser.setInput(getApplicationContext().getAssets().open(
+                         MCCMNC_PREFIX + id.getMcc() + id.getMnc() + ".xml"), "utf-8");
+                 config = readConfigFromXml(parser, id, sku);
++                trace.noteReadOk();
+             }
+         }
+-        catch (IOException | XmlPullParserException e) {
++        catch (IOException e) {
++            trace.noteFailure(DiagParseOutcome.IO);
++            Log.d(TAG, e.toString());
++            // We can return an empty config for unknown networks.
++            config = new PersistableBundle();
++        }
++        catch (XmlPullParserException e) {
++            trace.noteFailure(DiagParseOutcome.XML);
+             Log.d(TAG, e.toString());
+             // We can return an empty config for unknown networks.
+             config = new PersistableBundle();
+@@ -181,9 +423,15 @@ public class DefaultCarrierConfigService extends CarrierService {
+         XmlPullParser vendorInput = getApplicationContext().getResources().getXml(R.xml.vendor);
+         try {
+             PersistableBundle vendorConfig = readConfigFromXml(vendorInput, id, sku);
++            trace.noteReadOk();
+             config.putAll(vendorConfig);
+         }
+-        catch (IOException | XmlPullParserException e) {
++        catch (IOException e) {
++            trace.noteFailure(DiagParseOutcome.IO);
++            Log.e(TAG, e.toString());
++        }
++        catch (XmlPullParserException e) {
++            trace.noteFailure(DiagParseOutcome.XML);
+             Log.e(TAG, e.toString());
+         }
+ 

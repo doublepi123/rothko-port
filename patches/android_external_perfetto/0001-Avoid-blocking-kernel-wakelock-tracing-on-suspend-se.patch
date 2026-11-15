@@ -1,0 +1,31 @@
+From 97c5bb7ffb31ceceb76f96f71573891886a8ffc9 Mon Sep 17 00:00:00 2001
+From: lcy <admin@luchenyang.xyz>
+Date: Tue, 3 Nov 2026 03:21:46 +0800
+Subject: [PATCH] Avoid blocking kernel wakelock tracing on suspend service
+ lookup
+
+Use a non-waiting service lookup so unavailable or inaccessible optional suspend statistics do not leave the probe waiting for registration. Preserve retry, cache and dead-object reset behavior.
+
+Test: actual-source host Binder/FakeServiceManager fixture (17 checks); original source fails the no-wait control. Android SELinux/power E2E is not claimed.
+Change-Id: Id1a13b115ab69dcd50693afefae06c878b9feb1c
+---
+ src/android_internal/suspend_control_service.cc | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/android_internal/suspend_control_service.cc b/src/android_internal/suspend_control_service.cc
+index a4a7341c50..494e9cb24d 100644
+--- a/src/android_internal/suspend_control_service.cc
++++ b/src/android_internal/suspend_control_service.cc
+@@ -34,8 +34,10 @@ static android::sp<aidl::ISuspendControlServiceInternal> svc_ = nullptr;
+ 
+ aidl::ISuspendControlServiceInternal* MaybeGetService() {
+   if (svc_ == nullptr) {
+-    svc_ = android::waitForService<aidl::ISuspendControlServiceInternal>(
+-        android::String16("suspend_control_internal"));
++    // Do not wait for registration; missing/denied service returns null promptly.
++    svc_ = android::interface_cast<aidl::ISuspendControlServiceInternal>(
++        android::defaultServiceManager()->checkService(
++            android::String16("suspend_control_internal")));
+   }
+   return svc_.get();
+ }

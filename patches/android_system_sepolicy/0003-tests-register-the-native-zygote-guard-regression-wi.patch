@@ -1,0 +1,26 @@
+From 42e4cc028d0e02e901999901ab0e4bd4572b3f06 Mon Sep 17 00:00:00 2001
+From: lcy <admin@luchenyang.xyz>
+Date: Mon, 2 Nov 2026 23:47:19 +0800
+Subject: [PATCH 3/4] tests: register the native zygote guard regression with
+ bootstrap
+
+Change-Id: Ibc3d6d69c1f061d39deeb09eac543357cd1a68f0
+---
+ build/soong/Android.bp | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/build/soong/Android.bp b/build/soong/Android.bp
+index f9c08dd16..343d7abd0 100644
+--- a/build/soong/Android.bp
++++ b/build/soong/Android.bp
+@@ -48,6 +48,9 @@ bootstrap_go_package {
+         "service_fuzzer_bindings.go",
+         "validate_bindings.go",
+     ],
+-    testSrcs: ["selinux_test.go"],
++    testSrcs: [
++        "selinux_test.go",
++        "zygote_next_feature_test.go",
++    ],
+     pluginFor: ["soong_build"],
+ }

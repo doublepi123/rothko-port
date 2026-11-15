@@ -1,0 +1,403 @@
+From 11ed6630bb535d7c3b6ed38804193e57280274a3 Mon Sep 17 00:00:00 2001
+From: lcy <admin@luchenyang.xyz>
+Date: Sun, 15 Nov 2026 10:05:26 +0800
+Subject: [PATCH] fingerprint: UDFPS enrollment view adjustments for rothko
+
+Updates UdfpsEnrollView, its progress drawable and the enrolling view so
+the enrollment UI follows the rothko sensor location and illumination.
+---
+ .../fingerprint/UdfpsEnrollEnrollingView.java |   9 +-
+ .../UdfpsEnrollProgressBarDrawable.java       |  25 +-
+ .../fingerprint/UdfpsEnrollView.java          | 243 ++++++++++++++----
+ 3 files changed, 222 insertions(+), 55 deletions(-)
+
+diff --git a/src/com/android/settings/biometrics/fingerprint/UdfpsEnrollEnrollingView.java b/src/com/android/settings/biometrics/fingerprint/UdfpsEnrollEnrollingView.java
+index 931974eaf15..9bd0ebd6602 100644
+--- a/src/com/android/settings/biometrics/fingerprint/UdfpsEnrollEnrollingView.java
++++ b/src/com/android/settings/biometrics/fingerprint/UdfpsEnrollEnrollingView.java
+@@ -345,12 +345,13 @@ public class UdfpsEnrollEnrollingView extends GlifLayout {
+                 layoutLottieAnimationPadding, 0, 0);
+         final ImageView progressView = mUdfpsEnrollView.findViewById(
+                 R.id.udfps_enroll_animation_fp_progress_view);
+-        progressView.setPadding(0, -(layoutLottieAnimationPadding),
+-                0, layoutLottieAnimationPadding);
++        // UdfpsEnrollView accounts for the parent's lottie padding in its screen-to-local
++        // placement. Keep drawable bounds inside their view instead of cancelling that offset
++        // with negative ImageView padding, which also clips the top of a reduced progress ring.
++        progressView.setPadding(0, 0, 0, 0);
+         final ImageView fingerprintView = mUdfpsEnrollView.findViewById(
+                 R.id.udfps_enroll_animation_fp_view);
+-        fingerprintView.setPadding(0, -layoutLottieAnimationPadding,
+-                0, layoutLottieAnimationPadding);
++        fingerprintView.setPadding(0, 0, 0, 0);
+ 
+         // TODO(b/260970216) Instead of hiding the description text view, we should
+         //  make the header view scrollable if the text is too long.
+diff --git a/src/com/android/settings/biometrics/fingerprint/UdfpsEnrollProgressBarDrawable.java b/src/com/android/settings/biometrics/fingerprint/UdfpsEnrollProgressBarDrawable.java
+index 75251cf381f..55bd8fc239b 100644
+--- a/src/com/android/settings/biometrics/fingerprint/UdfpsEnrollProgressBarDrawable.java
++++ b/src/com/android/settings/biometrics/fingerprint/UdfpsEnrollProgressBarDrawable.java
+@@ -52,6 +52,8 @@ public class UdfpsEnrollProgressBarDrawable extends Drawable {
+     private static final long FILL_COLOR_ANIMATION_DURATION_MS = 350L;
+     private static final long PROGRESS_ANIMATION_DURATION_MS = 400L;
+     private static final float STROKE_WIDTH_DP = 12f;
++    // Maximum of the default OvershootInterpolator (tension=2), at t=5/9.
++    private static final float MAX_CHECKMARK_SCALE = 1f + 32f / 243f;
+     private static final Interpolator DEACCEL = new DecelerateInterpolator();
+ 
+     private static final VibrationEffect VIBRATE_EFFECT_ERROR =
+@@ -349,6 +351,22 @@ public class UdfpsEnrollProgressBarDrawable extends Drawable {
+         ta.recycle();
+     }
+ 
++    float getStrokeWidth() {
++        return mStrokeWidthPx;
++    }
++
++    static float getCheckmarkSizeScale(float width, float height, float strokeWidth,
++            int intrinsicWidth, int intrinsicHeight) {
++        final float diagonal = (float) Math.sqrt(2) / 2f;
++        // Keep the *entire* checkmark at maximum overshoot inside the same drawable bounds.
++        // One pixel covers rounding and antialiasing. Only this decorative glyph is scaled.
++        final float roomX = width / 2f - (width - strokeWidth) / 2f * diagonal - 1f;
++        final float roomY = height / 2f - (height - strokeWidth) / 2f * diagonal - 1f;
++        return Math.max(0f, Math.min(1f, Math.min(
++                roomX / (intrinsicWidth / 2f * MAX_CHECKMARK_SCALE),
++                roomY / (intrinsicHeight / 2f * MAX_CHECKMARK_SCALE))));
++    }
++
+     @Override
+     public void draw(@NonNull Canvas canvas) {
+         canvas.save();
+@@ -387,6 +405,9 @@ public class UdfpsEnrollProgressBarDrawable extends Drawable {
+         canvas.restore();
+ 
+         if (mCheckmarkScale > 0f) {
++            final float checkmarkScale = mCheckmarkScale * getCheckmarkSizeScale(
++                    getBounds().width(), getBounds().height(), mStrokeWidthPx,
++                    mCheckmarkDrawable.getIntrinsicWidth(), mCheckmarkDrawable.getIntrinsicHeight());
+             final float offsetScale = (float) Math.sqrt(2) / 2f;
+             final float centerXOffset = (getBounds().width() - mStrokeWidthPx) / 2f * offsetScale;
+             final float centerYOffset = (getBounds().height() - mStrokeWidthPx) / 2f * offsetScale;
+@@ -394,9 +415,9 @@ public class UdfpsEnrollProgressBarDrawable extends Drawable {
+             final float centerY = getBounds().centerY() + centerYOffset;
+ 
+             final float boundsXOffset =
+-                    mCheckmarkDrawable.getIntrinsicWidth() / 2f * mCheckmarkScale;
++                    mCheckmarkDrawable.getIntrinsicWidth() / 2f * checkmarkScale;
+             final float boundsYOffset =
+-                    mCheckmarkDrawable.getIntrinsicHeight() / 2f * mCheckmarkScale;
++                    mCheckmarkDrawable.getIntrinsicHeight() / 2f * checkmarkScale;
+ 
+             final int left = Math.round(centerX - boundsXOffset);
+             final int top = Math.round(centerY - boundsYOffset);
+diff --git a/src/com/android/settings/biometrics/fingerprint/UdfpsEnrollView.java b/src/com/android/settings/biometrics/fingerprint/UdfpsEnrollView.java
+index 0c80b483661..3c81bfaf17d 100644
+--- a/src/com/android/settings/biometrics/fingerprint/UdfpsEnrollView.java
++++ b/src/com/android/settings/biometrics/fingerprint/UdfpsEnrollView.java
+@@ -19,6 +19,7 @@ package com.android.settings.biometrics.fingerprint;
+ import android.content.Context;
+ import android.graphics.Rect;
+ import android.graphics.RectF;
++import android.graphics.Insets;
+ import android.hardware.fingerprint.FingerprintSensorProperties;
+ import android.os.Handler;
+ import android.os.Looper;
+@@ -26,7 +27,11 @@ import android.util.AttributeSet;
+ import android.util.RotationUtils;
+ import android.view.Gravity;
+ import android.view.Surface;
++import android.view.View;
+ import android.view.ViewGroup;
++import android.view.ViewParent;
++import android.view.ViewTreeObserver;
++import android.view.WindowInsets;
+ import android.widget.FrameLayout;
+ import android.widget.ImageView;
+ 
+@@ -35,6 +40,9 @@ import androidx.annotation.Nullable;
+ 
+ import com.android.settings.R;
+ import com.android.systemui.biometrics.shared.model.UdfpsOverlayParams;
++import com.google.android.setupcompat.template.FooterBarMixin;
++
++import java.util.ArrayList;
+ 
+ /**
+  * View corresponding with udfps_enroll_view.xml
+@@ -52,6 +60,12 @@ public class UdfpsEnrollView extends FrameLayout implements UdfpsEnrollHelper.Li
+     private ImageView mFingerprintProgressView;
+ 
+     private int mProgressBarRadius;
++    private int mRequestedProgressBarPadding;
++    private int mDecreasePadding;
++    private boolean mSensorRectApplied;
++    private ViewTreeObserver mGeometryObserver;
++    private final ViewTreeObserver.OnPreDrawListener mGeometryListener =
++            this::onGeometryPreDraw;
+ 
+     // sensorRect may be bigger than the sensor. True sensor dimensions are defined in
+     // overlayParams.sensorBounds
+@@ -114,9 +128,14 @@ public class UdfpsEnrollView extends FrameLayout implements UdfpsEnrollHelper.Li
+      */
+     public void setOverlayParams(UdfpsOverlayParams params) {
+         mOverlayParams = params;
++        if (params == null) {
++            mSensorRect = null;
++            return;
++        }
+ 
+         post(() -> {
+-            mProgressBarRadius =
++            if (mOverlayParams == null) return;
++            mRequestedProgressBarPadding =
+                     (int) (mOverlayParams.getScaleFactor() * getContext().getResources().getInteger(
+                             R.integer.config_udfpsEnrollProgressBar));
+             mSensorRect = new Rect(mOverlayParams.getSensorBounds());
+@@ -138,21 +157,61 @@ public class UdfpsEnrollView extends FrameLayout implements UdfpsEnrollHelper.Li
+      * @param decreasePadding the decrease padding
+      */
+     void setDecreasePadding(int decreasePadding) {
+-        mProgressBarRadius -= decreasePadding;
+-        onSensorRectUpdated();
++        // This is an absolute reduction from the resource, not a cumulative layout delta.
++        mDecreasePadding = Math.max(0, decreasePadding);
++        if (mOverlayParams != null) onSensorRectUpdated();
++    }
++
++    @Override
++    protected void onAttachedToWindow() {
++        super.onAttachedToWindow();
++        mGeometryObserver = getViewTreeObserver();
++        mGeometryObserver.addOnPreDrawListener(mGeometryListener);
++    }
++
++    @Override
++    protected void onDetachedFromWindow() {
++        if (mGeometryObserver != null && mGeometryObserver.isAlive()) {
++            mGeometryObserver.removeOnPreDrawListener(mGeometryListener);
++        }
++        mGeometryObserver = null;
++        super.onDetachedFromWindow();
++    }
++
++    private boolean onGeometryPreDraw() {
++        // An unattached View.post is queued at attach; its input initialization can still be
++        // pending at this traversal. Do not lay out or dereference that partially ready state.
++        return mOverlayParams == null || mSensorRect == null || !onSensorRectUpdated();
+     }
+ 
+-    private void onSensorRectUpdated() {
+-        updateDimensions();
++    private boolean onSensorRectUpdated() {
++        if (mOverlayParams == null || !(getParent() instanceof FrameLayout)
++                || mFingerprintProgressView == null || mSensorRect == null) {
++            return false;
++        }
++        final Rect rotatedBounds = getRotatedSensorBounds();
++        final int requested = Math.max(0, mRequestedProgressBarPadding - mDecreasePadding);
++        final Rect[] buttons = getFooterButtonBounds();
++        final int fitted = buttons == null ? -1 : calculateProgressPadding(rotatedBounds,
++                getSafeBounds(), buttons, requested, mFingerprintProgressDrawable.getStrokeWidth());
++        // Unknown geometry or a window too small to surround the unchanged sensor: retain the
++        // configured decoration, including normal progress, and retry at the next real layout.
++        // Never invent safe bounds, move/shrink the sensor, or claim that this fallback fits.
++        mProgressBarRadius = fitted >= 0 ? fitted : requested;
++        final boolean changed = updateDimensions(rotatedBounds);
+ 
+         // Updates sensor rect in relation to the overlay view
+-        mSensorRect.set(getPaddingX(), getPaddingY(),
+-                (mOverlayParams.getSensorBounds().width() + getPaddingX()),
+-                (mOverlayParams.getSensorBounds().height() + getPaddingY()));
+-        mFingerprintDrawable.onSensorRectUpdated(new RectF(mSensorRect));
++        final Rect localSensor = new Rect(getPaddingX(), getPaddingY(),
++                rotatedBounds.width() + getPaddingX(), rotatedBounds.height() + getPaddingY());
++        if (!mSensorRectApplied || !mSensorRect.equals(localSensor)) {
++            mSensorRect.set(localSensor);
++            mFingerprintDrawable.onSensorRectUpdated(new RectF(mSensorRect));
++            mSensorRectApplied = true;
++        }
++        return changed;
+     }
+ 
+-    private void updateDimensions() {
++    private Rect getRotatedSensorBounds() {
+         // Original sensorBounds assume portrait mode.
+         final Rect rotatedBounds = new Rect(mOverlayParams.getSensorBounds());
+         int rotation = mOverlayParams.getRotation();
+@@ -165,50 +224,136 @@ public class UdfpsEnrollView extends FrameLayout implements UdfpsEnrollHelper.Li
+             );
+         }
+ 
+-        // Use parent view's and rotatedBound's absolute coordinates to decide the margins of
+-        // UdfpsEnrollView, so that its center keeps consistent with sensor rect's.
+-        ViewGroup parentView = (ViewGroup) getParent();
+-        MarginLayoutParams marginLayoutParams = (MarginLayoutParams) getLayoutParams();
+-        FrameLayout.LayoutParams params = (LayoutParams) getLayoutParams();
+-        if (rotation == Surface.ROTATION_0 || rotation == Surface.ROTATION_180) {
+-            final int[] coords = parentView.getLocationOnScreen();
+-            final int parentLeft = coords[0];
+-            final int parentTop = coords[1];
+-            final int parentRight = parentLeft + parentView.getWidth();
+-            params.gravity = Gravity.RIGHT | Gravity.TOP;
+-            final int rightMargin = parentRight - rotatedBounds.right - getPaddingX();
+-            final int topMargin = rotatedBounds.top - parentTop - getPaddingY();
+-            if (marginLayoutParams.rightMargin == rightMargin
+-                    && marginLayoutParams.topMargin == topMargin) {
+-                return;
++        // Preserve the existing 180-degree placement policy. Correcting that separate sensor
++        // orientation issue must not silently move the accepted enrollment target in this fix.
++        return rotatedBounds;
++    }
++
++    static int calculateProgressPadding(Rect sensor, @Nullable Rect safe, int requested,
++            float strokeWidth) {
++        return calculateProgressPadding(sensor, safe, new Rect[0], requested, strokeWidth);
++    }
++
++    static int calculateProgressPadding(Rect sensor, @Nullable Rect safe, Rect[] obstacles,
++            int requested, float strokeWidth) {
++        if (safe == null || safe.isEmpty() || sensor.isEmpty()) return -1;
++        int available = Math.min(Math.min(sensor.left - safe.left,
++                        safe.right - sensor.right),
++                Math.min(sensor.top - safe.top, safe.bottom - sensor.bottom)) - 2;
++        for (Rect obstacle : obstacles) {
++            if (obstacle.isEmpty()) continue;
++            // The full decoration square must be separated on at least one axis. A side
++            // button can remain beside the ring; its transparent footer is not a full-width
++            // obstruction. Taking the maximum separation also handles buttons above/aside.
++            final int separation = Math.max(Math.max(obstacle.left - sensor.right,
++                            sensor.left - obstacle.right),
++                    Math.max(obstacle.top - sensor.bottom, sensor.top - obstacle.bottom));
++            available = Math.min(available, separation - 2);
++        }
++        final int padding = Math.min(Math.max(0, requested), available);
++        // Keep the complete stroke outside the sensor, plus a pixel-rounding/AA margin.
++        return padding >= Math.ceil(strokeWidth) + 2 ? padding : -1;
++    }
++
++    @Nullable
++    private Rect getSafeBounds() {
++        final View root = getRootView();
++        final WindowInsets windowInsets = getRootWindowInsets();
++        if (!isAttachedToWindow() || root.getWidth() <= 0 || root.getHeight() <= 0
++                || windowInsets == null) return null;
++        final int[] location = new int[2];
++        root.getLocationOnScreen(location);
++        final Insets insets = windowInsets.getInsets(WindowInsets.Type.systemBars()
++                | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
++        final Rect safe = new Rect(location[0] + insets.left, location[1] + insets.top,
++                location[0] + root.getWidth() - insets.right,
++                location[1] + root.getHeight() - insets.bottom);
++        final Rect visible = new Rect();
++        root.getWindowVisibleDisplayFrame(visible);
++        if (visible.isEmpty() || !safe.intersect(visible)) return null;
++
++        for (ViewParent node = getParent(); node instanceof View; node = node.getParent()) {
++            final View view = (View) node;
++            // Only untransformed ancestors are supported; otherwise safe geometry is unknown.
++            if (!view.getMatrix().isIdentity()) return null;
++            view.getLocationOnScreen(location);
++            if (view instanceof ViewGroup) {
++                final ViewGroup group = (ViewGroup) view;
++                final boolean paddingClip = group.getClipToPadding()
++                        && (view.getPaddingLeft() != 0 || view.getPaddingTop() != 0
++                        || view.getPaddingRight() != 0 || view.getPaddingBottom() != 0);
++                if (group.getClipChildren() || paddingClip) {
++                    final Rect clip = new Rect(location[0], location[1],
++                            location[0] + view.getWidth(), location[1] + view.getHeight());
++                    if (paddingClip) {
++                        clip.left += view.getPaddingLeft();
++                        clip.top += view.getPaddingTop();
++                        clip.right -= view.getPaddingRight();
++                        clip.bottom -= view.getPaddingBottom();
++                    }
++                    if (clip.isEmpty() || !safe.intersect(clip)) return null;
++                }
++                // A zero-height, non-clipping layout_container is an anchor, NOT a viewport.
+             }
+-            marginLayoutParams.rightMargin = rightMargin;
+-            marginLayoutParams.topMargin = topMargin;
+-            setLayoutParams(params);
+-        } else {
+-            final int[] coords = parentView.getLocationOnScreen();
+-            final int parentLeft = coords[0];
+-            final int parentTop = coords[1];
+-            final int parentRight = parentLeft + parentView.getWidth();
+-            final int parentBottom = parentTop + parentView.getHeight();
+-            if (rotation == Surface.ROTATION_90) {
+-                params.gravity = Gravity.RIGHT | Gravity.BOTTOM;
+-                marginLayoutParams.rightMargin = parentRight - rotatedBounds.right - getPaddingX();
+-                marginLayoutParams.bottomMargin =
+-                        parentBottom - rotatedBounds.bottom - getPaddingY();
+-            } else if (rotation == Surface.ROTATION_270) {
+-                params.gravity = Gravity.LEFT | Gravity.BOTTOM;
+-                marginLayoutParams.leftMargin = rotatedBounds.left - parentLeft - getPaddingX();
+-                marginLayoutParams.bottomMargin =
+-                        parentBottom - rotatedBounds.bottom - getPaddingY();
++            final Rect explicitClip = view.getClipBounds();
++            if (explicitClip != null) {
++                explicitClip.offset(location[0], location[1]);
++                if (explicitClip.isEmpty() || !safe.intersect(explicitClip)) return null;
+             }
+         }
++        return safe;
++    }
+ 
+-        params.height = rotatedBounds.height() + 2 * getPaddingX();
+-        params.width = rotatedBounds.width() + 2 * getPaddingY();
+-        setLayoutParams(params);
+-
++    @Nullable
++    private Rect[] getFooterButtonBounds() {
++        final ArrayList<Rect> obstacles = new ArrayList<>();
++        for (ViewParent node = getParent(); node instanceof View; node = node.getParent()) {
++            if (!(node instanceof UdfpsEnrollEnrollingView)) continue;
++            final FooterBarMixin footer = ((UdfpsEnrollEnrollingView) node)
++                    .getMixin(FooterBarMixin.class);
++            final View[] buttons = {footer.getPrimaryButtonView(), footer.getSecondaryButtonView()};
++            for (View button : buttons) {
++                if (button == null || !button.isShown()) continue;
++                if (button.getWidth() <= 0 || button.getHeight() <= 0) return null;
++                final int[] location = new int[2];
++                button.getLocationOnScreen(location);
++                obstacles.add(new Rect(location[0], location[1],
++                        location[0] + button.getWidth(), location[1] + button.getHeight()));
++            }
++            break;
++        }
++        return obstacles.toArray(new Rect[0]);
++    }
+ 
++    private boolean updateDimensions(Rect rotatedBounds) {
++        // FrameLayout adds its padding when placing children. Account for it exactly once;
++        // both ImageViews now have zero padding, so local sensor center maps to screen center.
++        ViewGroup parentView = (ViewGroup) getParent();
++        FrameLayout.LayoutParams params = (LayoutParams) getLayoutParams();
++        final int[] coords = parentView.getLocationOnScreen();
++        final int left = rotatedBounds.left - getPaddingX() - coords[0]
++                - parentView.getPaddingLeft() + parentView.getScrollX();
++        final int top = rotatedBounds.top - getPaddingY() - coords[1]
++                - parentView.getPaddingTop() + parentView.getScrollY();
++        final int width = rotatedBounds.width() + 2 * getPaddingX();
++        final int height = rotatedBounds.height() + 2 * getPaddingY();
++        // Absolute gravity does not mirror physical sensor coordinates in RTL. Compare sizes
++        // as well as margins: an unchanged origin must not skip a changed safe window.
++        if (params.gravity == (Gravity.LEFT | Gravity.TOP) && params.leftMargin == left
++                && params.topMargin == top && params.width == width && params.height == height) {
++            return false;
++        }
++        params.gravity = Gravity.LEFT | Gravity.TOP;
++        params.setMarginStart(MarginLayoutParams.DEFAULT_MARGIN_RELATIVE);
++        params.setMarginEnd(MarginLayoutParams.DEFAULT_MARGIN_RELATIVE);
++        params.leftMargin = left;
++        params.topMargin = top;
++        params.rightMargin = 0;
++        params.bottomMargin = 0;
++        params.width = width;
++        params.height = height;
++        setLayoutParams(params);
++        return true;
+     }
+ 
+     private void onFingerDown() {

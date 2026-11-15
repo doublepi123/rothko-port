@@ -1,0 +1,155 @@
+From 243f39d7f6a357595cd448e73ae197d90b526094 Mon Sep 17 00:00:00 2001
+From: lcy <admin@luchenyang.xyz>
+Date: Sun, 15 Nov 2026 10:05:25 +0800
+Subject: [PATCH] rothko: vibrator HAL instance fallback and BLAST init race
+ fix
+
+- vibratorservice: Xiaomi rothko registers its stock vibrator HAL only as
+  IVibrator/vibratorfeature; connect to that instance when default is absent.
+- gui: initialize all BLASTBufferQueue consumer state before the producer
+  history-resize callback can take mMutex, with a regression test.
+---
+ libs/gui/BLASTBufferQueue.cpp                 |  9 ++-
+ libs/gui/tests/BLASTBufferQueue_test.cpp      | 55 +++++++++++++++++++
+ .../vibratorservice/VibratorHalController.cpp | 18 ++++--
+ 3 files changed, 76 insertions(+), 6 deletions(-)
+
+diff --git a/libs/gui/BLASTBufferQueue.cpp b/libs/gui/BLASTBufferQueue.cpp
+index 05fbc148d2..d434e0b90d 100644
+--- a/libs/gui/BLASTBufferQueue.cpp
++++ b/libs/gui/BLASTBufferQueue.cpp
+@@ -192,7 +192,7 @@ void BLASTBufferItemConsumer::resizeFrameEventHistory(size_t newSize) {
+ }
+ 
+ void BLASTBufferQueue::initialize() {
+-    std::lock_guard _lock{mMutex};
++    UNIQUE_LOCK_WITH_ASSERTION(mMutex);
+     createBufferQueue(&mProducer, &mConsumer);
+     mBufferItemConsumer =
+             sp<BLASTBufferItemConsumer>::make(mProducer, mConsumer,
+@@ -224,7 +224,12 @@ void BLASTBufferQueue::initialize() {
+             this);
+ 
+     // safe default, most producers are expected to override this
+-    mProducer->setMaxDequeuedBufferCount(2);
++    {
++        // The producer can call resizeFrameEventHistory(), which takes mMutex.
++        // All consumer state is initialized before allowing the callback.
++        UnlockGuard unlockGuard{_lock};
++        mProducer->setMaxDequeuedBufferCount(2);
++    }
+ 
+     BQA_LOGV("BLASTBufferQueue created");
+ }
+diff --git a/libs/gui/tests/BLASTBufferQueue_test.cpp b/libs/gui/tests/BLASTBufferQueue_test.cpp
+index 5cb42808aa..dd97f0c9f1 100644
+--- a/libs/gui/tests/BLASTBufferQueue_test.cpp
++++ b/libs/gui/tests/BLASTBufferQueue_test.cpp
+@@ -43,6 +43,8 @@
+ 
+ #include <gtest/gtest.h>
+ 
++#include <unistd.h>
++
+ #include <com_android_graphics_libgui_flags.h>
+ 
+ using namespace std::chrono_literals;
+@@ -79,6 +81,21 @@ private:
+ 
+ class TestBLASTBufferQueue : public BLASTBufferQueue {
+ public:
++    static sp<TestBLASTBufferQueue> createForInitialization() {
++        // sp::make invokes the real onFirstRef()->initialize(), not a test copy.
++        return sp<TestBLASTBufferQueue>::make("InitializeFrameHistory");
++    }
++
++    bool initializationMutexIsAvailable() {
++        std::unique_lock lock{mMutex, std::try_to_lock};
++        return lock.owns_lock();
++    }
++
++    int32_t initializedAcquiredBufferCount() {
++        std::scoped_lock lock(mMutex);
++        return mMaxAcquiredBuffers;
++    }
++
+     static sp<TestBLASTBufferQueue> create(const sp<SurfaceControl>& surface, int width,
+                                            int height) {
+         auto blastBufferQueueAdapter = sp<TestBLASTBufferQueue>::make("TestBLASTBufferQueue");
+@@ -115,6 +132,44 @@ private:
+     int64_t mLastTransactionFrameNumber = -1;
+ };
+ 
++// A real SurfaceFlinger is required: its acquired count must force the final
++// initialize() setter through BBQBufferQueueProducer's history-growth callback.
++// Lower-count/history-override devices cannot exercise this regression and skip
++// explicitly rather than reporting a no-callback construction as coverage.
++TEST(BLASTBufferQueueInitializationDeathTest, InitialHistoryGrowthAndLaterProducerChanges) {
++    int32_t acquiredCount = 0;
++    ASSERT_TRUE(ComposerServiceAIDL::getComposerService()
++                        ->getMaxAcquiredBufferCount(&acquiredCount)
++                        .isOk());
++    if (static_cast<size_t>(acquiredCount) + 4 <= FrameEventHistory::INITIAL_MAX_FRAME_HISTORY) {
++        GTEST_SKIP() << "SurfaceFlinger count/history does not trigger initialize history growth";
++    }
++
++    // Re-exec instead of forking a process that already has Binder threads.
++    // On the old code alarm terminates the child stuck in the real initialize;
++    // the parent gets a bounded failure, not a hung test-suite process.
++    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
++    ASSERT_EXIT(
++            {
++                alarm(10);
++                auto queue = TestBLASTBufferQueue::createForInitialization();
++                if (static_cast<size_t>(queue->initializedAcquiredBufferCount()) + 4 <=
++                    FrameEventHistory::INITIAL_MAX_FRAME_HISTORY) {
++                    _exit(1);
++                }
++                if (!queue->initializationMutexIsAvailable()) _exit(2);
++                auto producer = queue->getIGraphicBufferProducer();
++                if (producer->setMaxDequeuedBufferCount(3) != OK) _exit(3);
++                if (producer->setMaxDequeuedBufferCount(-1) != BAD_VALUE) _exit(4);
++                if (producer->setMaxDequeuedBufferCount(2) != OK) _exit(5);
++                if (!queue->initializationMutexIsAvailable()) _exit(6);
++                queue.clear();
++                alarm(0);
++                _exit(0);
++            },
++            ::testing::ExitedWithCode(0), "");
++}
++
+ class BLASTBufferQueueHelper {
+ public:
+     BLASTBufferQueueHelper(const sp<SurfaceControl>& sc, int width, int height) {
+diff --git a/services/vibratorservice/VibratorHalController.cpp b/services/vibratorservice/VibratorHalController.cpp
+index 302e3e1299..9b4fe57165 100644
+--- a/services/vibratorservice/VibratorHalController.cpp
++++ b/services/vibratorservice/VibratorHalController.cpp
+@@ -46,13 +46,23 @@ std::shared_ptr<HalWrapper> connectHal(std::shared_ptr<CallbackScheduler> schedu
+         return nullptr;
+     }
+ 
+-    auto serviceName = std::string(IVibrator::descriptor) + "/default";
+-    if (AServiceManager_isDeclared(serviceName.c_str())) {
++    // Xiaomi rothko registers its stock HAL only as IVibrator/vibratorfeature.
++    for (const char* instance : {"/default", "/vibratorfeature"}) {
++        auto serviceName = std::string(IVibrator::descriptor) + instance;
++        if (!AServiceManager_isDeclared(serviceName.c_str())) {
++            continue;
++        }
+         std::shared_ptr<IVibrator> hal = IVibrator::fromBinder(
+                 ndk::SpAIBinder(AServiceManager_waitForService(serviceName.c_str())));
+         if (hal) {
+-            ALOGV("Successfully connected to Vibrator HAL AIDL service.");
+-            return std::make_shared<AidlHalWrapper>(std::move(scheduler), std::move(hal));
++            ALOGI("Successfully connected to Vibrator HAL AIDL service %s.", serviceName.c_str());
++            auto reconnectFn = [serviceName]() {
++                auto reconnected = IVibrator::fromBinder(
++                        ndk::SpAIBinder(AServiceManager_checkService(serviceName.c_str())));
++                return HalResult<std::shared_ptr<IVibrator>>::ok(std::move(reconnected));
++            };
++            return std::make_shared<AidlHalWrapper>(std::move(scheduler), std::move(hal),
++                                                    std::move(reconnectFn));
+         }
+     }
+ 

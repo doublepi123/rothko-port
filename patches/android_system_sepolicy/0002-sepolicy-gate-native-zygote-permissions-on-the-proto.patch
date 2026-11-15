@@ -1,0 +1,291 @@
+From d23a3ff03df20c254e75cff5d6e8e2a8f72dfb3b Mon Sep 17 00:00:00 2001
+From: lcy <admin@luchenyang.xyz>
+Date: Mon, 2 Nov 2026 23:00:19 +0800
+Subject: [PATCH 2/4] sepolicy: gate native zygote permissions on the prototype
+ flag
+
+Change-Id: I63dac3b1c3cd1d45b368739f51cebaef0d3b55b4
+---
+ build/soong/selinux_test.go             |  64 ++++++++++++
+ build/soong/zygote_next_feature_test.go | 129 ++++++++++++++++++++++++
+ flagging/Android.bp                     |   1 +
+ private/app.te                          |   4 +
+ private/system_server.te                |   2 +
+ private/zygote_next.te                  |   2 +
+ 6 files changed, 202 insertions(+)
+ create mode 100644 build/soong/zygote_next_feature_test.go
+
+diff --git a/build/soong/selinux_test.go b/build/soong/selinux_test.go
+index c86f11664..e6e69d519 100644
+--- a/build/soong/selinux_test.go
++++ b/build/soong/selinux_test.go
+@@ -300,3 +300,67 @@ func TestBuildFilesFilegroupTagResolution(t *testing.T) {
+ 		)
+ 	}
+ }
++
++// TestAospSelinuxFlagsIncludesZygoteNextSelector verifies that the real
++// aosp_selinux_flags registration is what feeds se_flags_collector, so deleting
++// the zygote_next selector flag from the production Android.bp fails this test.
++func TestAospSelinuxFlagsIncludesZygoteNextSelector(t *testing.T) {
++	realBp, err := os.ReadFile("../../flagging/Android.bp")
++	if err != nil {
++		t.Fatalf("read real flagging/Android.bp: %v", err)
++	}
++	text := string(realBp)
++	if !strings.Contains(text, `"RELEASE_NATIVE_FRAMEWORK_PROTOTYPE"`) {
++		t.Fatalf("RELEASE_NATIVE_FRAMEWORK_PROTOTYPE is not registered in the real aosp_selinux_flags list")
++	}
++	start := strings.Index(text, "se_flags {")
++	if start < 0 {
++		t.Fatalf("real flagging/Android.bp has no se_flags block")
++	}
++	end := strings.Index(text[start:], "\n}\n")
++	if end < 0 {
++		t.Fatalf("cannot isolate real se_flags block")
++	}
++	flagsBlock := text[start : start+end+3]
++	fixtureBp := flagsBlock + `
++	se_flags_collector {
++		name: "all_selinux_flags",
++	}
++	`
++	for _, tc := range []struct {
++		name  string
++		value string
++		want  string
++	}{
++		{"off_empty", "", "-D target_flag_RELEASE_NATIVE_FRAMEWORK_PROTOTYPE="},
++		{"on_true", "true", "-D target_flag_RELEASE_NATIVE_FRAMEWORK_PROTOTYPE=true"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			ctx := android.GroupFixturePreparers(
++				prepareForTest,
++				android.FixtureModifyProductVariables(func(variables android.FixtureProductVariables) {
++					variables.BuildFlags["RELEASE_NATIVE_FRAMEWORK_PROTOTYPE"] = tc.value
++					variables.BuildFlags["RELEASE_RANGING_STACK"] = "true"
++				}),
++				android.FixtureAddTextFile("system/sepolicy/flagging/Android.bp", fixtureBp),
++			).RunTest(t).TestContext
++
++			collectorModule := ctx.ModuleForTests(t, "all_selinux_flags", "").Module()
++			collectorData, ok := android.OtherModuleProvider(ctx.OtherModuleProviderAdaptor(), collectorModule, buildFlagsInfoProvider)
++			if !ok {
++				t.Fatalf("all_selinux_flags must provide buildFlags")
++			}
++			actual := flagsToM4Macros(collectorData.BuildFlags)
++			expected := []string{
++				"-D target_flag_RELEASE_AVF_ENABLE_DEVICE_ASSIGNMENT=true",
++				tc.want,
++				"-D target_flag_RELEASE_RANGING_STACK=true",
++			}
++			if !reflect.DeepEqual(actual, expected) {
++				t.Errorf("M4 macros did not preserve real registration/order"+
++					"\nactual:   %v"+
++					"\nexpected: %v", actual, expected)
++			}
++		})
++	}
++}
+diff --git a/build/soong/zygote_next_feature_test.go b/build/soong/zygote_next_feature_test.go
+new file mode 100644
+index 000000000..6f7ee9b58
+--- /dev/null
++++ b/build/soong/zygote_next_feature_test.go
+@@ -0,0 +1,129 @@
++// Copyright 2024 The Android Open Source Project
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package selinux
++
++import (
++	"os"
++	"os/exec"
++	"strings"
++	"testing"
++)
++
++// TestZygoteNextFeatureGuardM4 runs the real flagging macro over the real
++// zygote_next.te for every supported value. It intentionally fails if m4 is
++// missing rather than skipping. Other te_macros are left unexpanded on
++// purpose: this checks the guard source, not a complete CIL policy build.
++func TestZygoteNextFeatureGuardM4(t *testing.T) {
++	m4, err := exec.LookPath("m4")
++	if err != nil {
++		t.Fatalf("m4 is required for the native guard test: %v", err)
++	}
++	macroFile := "../../flagging/flagging_macros"
++	zygoteFile := "../../private/zygote_next.te"
++	cases := []struct {
++		name    string
++		defined bool
++		value   string
++		enabled bool
++	}{
++		{"undefined", false, "", false},
++		{"empty_off", true, "", false},
++		// typed false serializes to the native empty string; this test does not
++		// rewrite or claim a Go bool marshaller.
++		{"typed_false_serialized_empty_off", true, "", false},
++		{"raw_false_off", true, "false", false},
++		{"raw_one_off", true, "1", false},
++		{"true_on", true, "true", true},
++	}
++	gatedMarkers := []string{
++		"init_daemon_domain(zygote_next)",
++		"allow zygote_next isolated_app:process dyntransition;",
++		"allow zygote_next self:global_capability_class_set { dac_override setgid setuid };",
++	}
++	typeMarkers := []string{
++		"type zygote_next, domain;",
++		"typeattribute zygote_next coredomain;",
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			args := []string{"--fatal-warnings"}
++			if tc.defined {
++				args = append(args, "-D", "target_flag_RELEASE_NATIVE_FRAMEWORK_PROTOTYPE="+tc.value)
++			}
++			args = append(args, macroFile, zygoteFile)
++			out, err := exec.Command(m4, args...).CombinedOutput()
++			if err != nil {
++				t.Fatalf("m4 failed: %v\n%s", err, out)
++			}
++			text := string(out)
++			for _, marker := range typeMarkers {
++				if !strings.Contains(text, marker) {
++					t.Errorf("m4 output for %s lost type declaration %q", tc.name, marker)
++				}
++			}
++			for _, marker := range gatedMarkers {
++				present := strings.Contains(text, marker)
++				t.Logf("%s: marker %q present=%v", tc.name, marker, present)
++				if present != tc.enabled {
++					t.Errorf("gated marker %q present=%v, want %v for %s", marker, present, tc.enabled, tc.name)
++				}
++			}
++		})
++	}
++
++	systemServer, err := os.ReadFile("../../private/system_server.te")
++	if err != nil {
++		t.Fatalf("read system_server.te: %v", err)
++	}
++	if !strings.Contains(string(systemServer),
++		"is_flag_enabled(RELEASE_NATIVE_FRAMEWORK_PROTOTYPE, `\nunix_socket_connect(system_server, zygote_next, zygote_next)\n')") {
++		t.Errorf("system_server.te does not guard only the zygote_next socket connection")
++	}
++	if !strings.Contains(string(systemServer), "unix_socket_connect(system_server, zygote, zygote)") {
++		t.Errorf("system_server.te lost the ordinary zygote socket connection")
++	}
++
++	app, err := os.ReadFile("../../private/app.te")
++	if err != nil {
++		t.Fatalf("read app.te: %v", err)
++	}
++	appText := string(app)
++	for _, required := range []string{
++		"allow appdomain zygote:fd use;\nis_flag_enabled(RELEASE_NATIVE_FRAMEWORK_PROTOTYPE, `\nallow appdomain zygote_next:fd use;\n')",
++		"allow appdomain zygote:unix_dgram_socket write;\nis_flag_enabled(RELEASE_NATIVE_FRAMEWORK_PROTOTYPE, `\nallow appdomain zygote_next:unix_dgram_socket write;\n')",
++		"allow appdomain app_zygote:fd use;",
++	} {
++		if !strings.Contains(appText, required) {
++			t.Errorf("app.te missing expected guarded/ordinary text: %q", required)
++		}
++	}
++
++	fileContexts, err := os.ReadFile("../../private/file_contexts")
++	if err != nil {
++		t.Fatalf("read file_contexts: %v", err)
++	}
++	for _, required := range []string{"/dev/socket/zygote_next", "/system/bin/zygote_next"} {
++		if !strings.Contains(string(fileContexts), required) {
++			t.Errorf("file_contexts lost %q", required)
++		}
++	}
++	domain, err := os.ReadFile("../../private/domain.te")
++	if err != nil {
++		t.Fatalf("read domain.te: %v", err)
++	}
++	if !strings.Contains(string(domain), "-zygote_next") || !strings.Contains(string(domain), "  zygote_next\n") {
++		t.Errorf("domain.te lost the zygote_next neverallow exclusion")
++	}
++}
+diff --git a/flagging/Android.bp b/flagging/Android.bp
+index fb76f3c25..4fc2a6fc4 100644
+--- a/flagging/Android.bp
++++ b/flagging/Android.bp
+@@ -25,6 +25,7 @@ se_flags {
+         "RELEASE_AVF_ENABLE_MICROFUCHSIA",
+         "RELEASE_AVF_ENABLE_VM_TO_TEE_SERVICES_ALLOWLIST",
+         "RELEASE_AVF_ENABLE_WIDEVINE_PVM",
++        "RELEASE_NATIVE_FRAMEWORK_PROTOTYPE",
+         "RELEASE_RANGING_STACK",
+         "RELEASE_READ_FROM_NEW_STORAGE",
+         "RELEASE_SUPERVISION_SERVICE",
+diff --git a/private/app.te b/private/app.te
+index b971625c2..7db3a7f9c 100644
+--- a/private/app.te
++++ b/private/app.te
+@@ -207,7 +207,9 @@ allow appdomain { ashmem_device ashmem_libcutils_device }:chr_file execute;
+ 
+ # Receive and use open file descriptors inherited from zygote.
+ allow appdomain zygote:fd use;
++is_flag_enabled(RELEASE_NATIVE_FRAMEWORK_PROTOTYPE, `
+ allow appdomain zygote_next:fd use;
++')
+ 
+ # Receive and use open file descriptors inherited from app zygote.
+ allow appdomain app_zygote:fd use;
+@@ -469,7 +471,9 @@ allow appdomain resourcecache_data_file:dir r_dir_perms;
+ read_logd(appdomain)
+ 
+ allow appdomain zygote:unix_dgram_socket write;
++is_flag_enabled(RELEASE_NATIVE_FRAMEWORK_PROTOTYPE, `
+ allow appdomain zygote_next:unix_dgram_socket write;
++')
+ 
+ allow appdomain console_device:chr_file { read write };
+ 
+diff --git a/private/system_server.te b/private/system_server.te
+index d85caed61..a24e24e96 100644
+--- a/private/system_server.te
++++ b/private/system_server.te
+@@ -274,7 +274,9 @@ allow system_server self:tun_socket create_socket_perms_no_ioctl;
+ # Talk to init and various daemons via sockets.
+ unix_socket_connect(system_server, lmkd, lmkd)
+ unix_socket_connect(system_server, zygote, zygote)
++is_flag_enabled(RELEASE_NATIVE_FRAMEWORK_PROTOTYPE, `
+ unix_socket_connect(system_server, zygote_next, zygote_next)
++')
+ unix_socket_connect(system_server, uncrypt, uncrypt)
+ 
+ # Allow system_server to write to statsd.
+diff --git a/private/zygote_next.te b/private/zygote_next.te
+index b24c68ea7..5363cb49c 100644
+--- a/private/zygote_next.te
++++ b/private/zygote_next.te
+@@ -4,6 +4,7 @@ type zygote_next_exec, system_file_type, exec_type, file_type;
+ typeattribute zygote_next coredomain;
+ typeattribute zygote_next mlstrustedsubject;
+ 
++is_flag_enabled(RELEASE_NATIVE_FRAMEWORK_PROTOTYPE, `
+ init_daemon_domain(zygote_next)
+ 
+ # Override DAC on files and switch uid/gid.
+@@ -25,3 +26,4 @@ selinux_check_access(zygote_next)
+ 
+ allow zygote_next self:process setcurrent;
+ allow zygote_next isolated_app:process dyntransition;
++') # is_flag_enabled(RELEASE_NATIVE_FRAMEWORK_PROTOTYPE)

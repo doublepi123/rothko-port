@@ -1,0 +1,3454 @@
+From a1776506c5b8c3ebe2507e1e90e79055a7cbf917 Mon Sep 17 00:00:00 2001
+From: lcy <admin@luchenyang.xyz>
+Date: Sun, 15 Nov 2026 10:05:27 +0800
+Subject: [PATCH] recovery: normal-exit bridge and loader guard for rothko
+
+Adds an explicit normal-exit phase/bridge so a recovery-initiated reboot
+to system reports every real outcome, plus a launcher/loader guard used by
+the rothko recovery runtime.
+---
+ Android.bp                                  |  32 +
+ normal_exit/get_args_canonical.cpp          |  48 ++
+ normal_exit/get_args_canonical.h            |  35 +
+ normal_exit/normal_exit.cpp                 | 439 ++++++++++++
+ normal_exit/normal_exit.h                   | 214 ++++++
+ normal_exit/normal_exit_posix.cpp           | 138 ++++
+ normal_exit/normal_exit_posix.h             |  50 ++
+ otautil/include/otautil/normal_exit_phase.h |  32 +
+ otautil/sysutil.cpp                         |  10 +
+ own_attr_context.h                          | 135 ++++
+ recovery.cpp                                | 137 +++-
+ recovery.h                                  |  26 +
+ recovery_enforcement.h                      |  72 ++
+ recovery_launcher.cpp                       | 226 ++++++
+ recovery_launcher.h                         | 153 ++++
+ recovery_loader_guard.cpp                   | 279 ++++++++
+ recovery_loader_guard.h                     | 124 ++++
+ recovery_main.cpp                           |  46 ++
+ recovery_normal_exit_bridge.cpp             | 731 ++++++++++++++++++++
+ recovery_normal_exit_bridge.h               |  85 +++
+ static_transition_facts.h                   |  53 ++
+ 21 files changed, 3051 insertions(+), 14 deletions(-)
+ create mode 100644 normal_exit/get_args_canonical.cpp
+ create mode 100644 normal_exit/get_args_canonical.h
+ create mode 100644 normal_exit/normal_exit.cpp
+ create mode 100644 normal_exit/normal_exit.h
+ create mode 100644 normal_exit/normal_exit_posix.cpp
+ create mode 100644 normal_exit/normal_exit_posix.h
+ create mode 100644 otautil/include/otautil/normal_exit_phase.h
+ create mode 100644 own_attr_context.h
+ create mode 100644 recovery_enforcement.h
+ create mode 100644 recovery_launcher.cpp
+ create mode 100644 recovery_launcher.h
+ create mode 100644 recovery_loader_guard.cpp
+ create mode 100644 recovery_loader_guard.h
+ create mode 100644 recovery_normal_exit_bridge.cpp
+ create mode 100644 recovery_normal_exit_bridge.h
+ create mode 100644 static_transition_facts.h
+
+diff --git a/Android.bp b/Android.bp
+index 60b2cc6f..f02ad8eb 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -54,6 +54,7 @@ soong_config_module_type {
+     name: "recovery_cc_defaults",
+     module_type: "cc_defaults",
+     config_namespace: "recovery",
++    bool_variables: ["rothko_private_runtime"],
+     value_variables: ["recovery_api_version"],
+     properties: [
+         "cflags",
+@@ -64,6 +65,12 @@ recovery_cc_defaults {
+     name: "recovery_defaults",
+ 
+     soong_config_variables: {
++        rothko_private_runtime: {
++            cflags: [
++                "-DROTHKO_PRIVATE_RECOVERY_RUNTIME=1",
++                "-DROTHKO_RECOVERY_NORMAL_EXIT=1",
++            ],
++        },
+         recovery_api_version: {
+             cflags: [
+                 "-D_FILE_OFFSET_BITS=64",
+@@ -148,6 +155,10 @@ cc_library_static {
+ 
+     srcs: [
+         "recovery.cpp",
++        "recovery_normal_exit_bridge.cpp",
++        "normal_exit/get_args_canonical.cpp",
++        "normal_exit/normal_exit.cpp",
++        "normal_exit/normal_exit_posix.cpp",
+     ],
+ 
+     shared_libs: [
+@@ -187,6 +198,7 @@ cc_binary {
+     static_libs: [
+         "librecovery",
+         "librecovery_ui_default",
++        "librecovery_loader_guard",
+     ],
+ 
+     required: [
+@@ -203,6 +215,26 @@ cc_binary {
+     ],
+ }
+ 
++// Built as ordinary intermediates; the reviewed device packer places these
++// artifacts in the fixed private runtime. No install_in_root exception.
++cc_binary {
++    name: "recovery-launcher",
++    recovery: true,
++    srcs: ["recovery_launcher.cpp"],
++    static_executable: true,
++    stl: "none",
++    cflags: ["-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-fno-rtti"],
++}
++
++cc_library_static {
++    name: "librecovery_loader_guard",
++    recovery: true,
++    srcs: ["recovery_loader_guard.cpp"],
++    shared_libs: ["libdl"],
++    stl: "none",
++    cflags: ["-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-fno-rtti"],
++}
++
+ // The dynamic executable that runs after /data mounts.
+ cc_binary {
+     name: "recovery-persist",
+diff --git a/normal_exit/get_args_canonical.cpp b/normal_exit/get_args_canonical.cpp
+new file mode 100644
+index 00000000..9807a414
+--- /dev/null
++++ b/normal_exit/get_args_canonical.cpp
+@@ -0,0 +1,48 @@
++// SPDX-FileCopyrightText: The LineageOS Project
++// SPDX-License-Identifier: Apache-2.0
++
++#include "get_args_canonical.h"
++
++#include <utility>
++
++namespace rothko::recovery {
++
++bool CanonicalizeBootRecovery(const std::vector<std::string>& argv_options,
++                              const std::string& recovery_field,
++                              std::string* canonical) {
++  if (canonical == nullptr) return false;
++
++  std::vector<std::string> options;
++  if (!argv_options.empty()) {
++    // get_args() only reads the BCB when no command-line option was supplied.
++    options = argv_options;
++  } else if (!recovery_field.empty()) {
++    if (recovery_field.back() != '\n') return false;
++    std::size_t start = 0;
++    bool first = true;
++    for (;;) {
++      const std::size_t pos = recovery_field.find('\n', start);
++      const std::string token = pos == std::string::npos
++                                    ? recovery_field.substr(start)
++                                    : recovery_field.substr(start, pos - start);
++      if (first) {
++        if (token != "recovery") return false;
++      } else if (!token.empty() && token[0] != '\0') {
++        options.push_back(token);
++      }
++      first = false;
++      if (pos == std::string::npos) break;
++      start = pos + 1;
++    }
++  }
++
++  std::string out = "recovery\n";
++  for (const auto& option : options) {
++    out += option;
++    if (option.empty() || option.back() != '\n') out += '\n';
++  }
++  *canonical = std::move(out);
++  return true;
++}
++
++}  // namespace rothko::recovery
+diff --git a/normal_exit/get_args_canonical.h b/normal_exit/get_args_canonical.h
+new file mode 100644
+index 00000000..bf78655c
+--- /dev/null
++++ b/normal_exit/get_args_canonical.h
+@@ -0,0 +1,35 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <string>
++#include <vector>
++
++namespace rothko::recovery {
++
++// Adapter helper, not a second coordinator: reproduces the standard
++// get_args()/update_bootloader_message() rewrite of a boot-recovery BCB so the
++// pre-get_args capture can be compared with the post-get_args BCB by key.
++//
++// The raw capture is validated as clean *before* this is called. Returns false
++// when the field is not the canonical "recovery\n<option>\n..." form, in which
++// case the caller keeps the raw capture and the core blocks it.
++bool CanonicalizeBootRecovery(const std::vector<std::string>& argv_options,
++                              const std::string& recovery_field,
++                              std::string* canonical);
++
++}  // namespace rothko::recovery
+diff --git a/normal_exit/normal_exit.cpp b/normal_exit/normal_exit.cpp
+new file mode 100644
+index 00000000..7b40a9d0
+--- /dev/null
++++ b/normal_exit/normal_exit.cpp
+@@ -0,0 +1,439 @@
++// SPDX-FileCopyrightText: The LineageOS Project
++// SPDX-License-Identifier: Apache-2.0
++
++#include "normal_exit.h"
++
++#include <string>
++#include <utility>
++
++namespace rothko::recovery {
++namespace {
++
++struct ParsedArgs {
++  std::vector<std::string> args;
++  std::optional<Reason> reason;
++  bool show_text = false;
++};
++
++bool ParseReasonValue(std::string_view value, Reason* out) {
++  if (value == "userrequested") {
++    *out = Reason::kUserRequested;
++    return true;
++  }
++  if (value == "adb") {
++    *out = Reason::kAdb;
++    return true;
++  }
++  if (value == "recovery_ui") {
++    *out = Reason::kRecoveryUi;
++    return true;
++  }
++  return false;
++}
++
++bool ParseArgTokens(const std::vector<std::string>& in, ParsedArgs* out) {
++  bool reason_seen = false;
++  for (const auto& arg : in) {
++    if (arg == "--show_text") {
++      if (out->show_text) return false;
++      out->show_text = true;
++      continue;
++    }
++    if (arg.rfind("--reason=", 0) == 0) {
++      Reason reason;
++      if (reason_seen || !ParseReasonValue(std::string_view(arg).substr(9), &reason)) {
++        return false;
++      }
++      out->reason = reason;
++      reason_seen = true;
++      continue;
++    }
++    return false;  // any update/wipe/sideload/locale/fastboot/unknown arg
++  }
++  out->args = in;
++  return true;
++}
++
++std::vector<std::string> SplitLines(std::string_view text) {
++  std::vector<std::string> lines;
++  std::size_t start = 0;
++  while (true) {
++    const std::size_t pos = text.find('\n', start);
++    if (pos == std::string_view::npos) {
++      lines.emplace_back(text.substr(start));
++      break;
++    }
++    lines.emplace_back(text.substr(start, pos - start));
++    start = pos + 1;
++  }
++  return lines;
++}
++
++bool ParseRecoveryField(std::string_view field, ParsedArgs* out) {
++  if (field.empty()) return true;
++  // The standard writer emits "recovery\n" and appends each option followed by
++  // a newline. A non-empty field without the canonical first line is unknown.
++  if (field.back() != '\n') return false;
++  const auto lines = SplitLines(field);
++  if (lines.size() < 2 || lines.front() != "recovery") return false;
++  std::vector<std::string> args;
++  for (std::size_t i = 1; i < lines.size(); ++i) {
++    if (lines[i].empty()) {
++      if (i + 1 == lines.size()) continue;  // trailing newline
++      return false;                        // internal empty line
++    }
++    args.push_back(lines[i]);
++  }
++  return ParseArgTokens(args, out);
++}
++
++bool Evaluate(const Capture& capture, ParsedArgs* argv, ParsedArgs* bcb,
++              std::optional<Reason>* derived_reason, std::string* why) {
++  auto fail = [&](const char* reason) {
++    if (why != nullptr) *why = reason;
++    return false;
++  };
++  if (!capture.captured_before_get_args) return fail("captured_after_get_args");
++  if (capture.argv_status != ReadStatus::kOk) return fail("argv_read_error");
++  if (capture.bcb_status != ReadStatus::kOk) return fail("bcb_read_error");
++  if (capture.commandfile == CommandFile::kError) return fail("commandfile_read_error");
++  if (capture.commandfile == CommandFile::kPresent) return fail("commandfile_present");
++  if (capture.reason_status != ReadStatus::kOk) return fail("reason_read_error");
++  if (capture.stage_status != ReadStatus::kOk) return fail("stage_read_error");
++  if (!capture.bcb.status.empty()) return fail("bcb_status_nonempty");
++  if (!capture.bcb.stage.empty()) return fail("bcb_stage_nonempty");
++  if (!capture.bcb.reserved_zero) return fail("bcb_reserved_nonzero");
++  if (capture.bcb.command != "" && capture.bcb.command != "boot-recovery") {
++    return fail("bcb_command_unknown");
++  }
++  if (capture.stage && !capture.stage->empty()) return fail("stage_nonempty");
++
++  ParsedArgs argv_args;
++  ParsedArgs bcb_args;
++  if (!ParseArgTokens(capture.argv, &argv_args)) return fail("argv_not_pure_manual_idle");
++  if (!ParseRecoveryField(capture.bcb.recovery, &bcb_args)) {
++    return fail("bcb_recovery_unknown");
++  }
++  if (capture.bcb.command.empty() && !capture.bcb.recovery.empty()) {
++    return fail("recovery_without_boot_recovery");
++  }
++
++  if (argv_args.reason && bcb_args.reason && *argv_args.reason != *bcb_args.reason) {
++    return fail("argv_bcb_reason_mismatch");
++  }
++  std::optional<Reason> derived =
++      argv_args.reason ? argv_args.reason : bcb_args.reason;
++
++  std::optional<Reason> independent;
++  if (capture.reason && !capture.reason->empty()) {
++    Reason reason;
++    if (!ParseReasonValue(*capture.reason, &reason)) return fail("reason_unknown");
++    independent = reason;
++  }
++  if (derived && !independent) return fail("reason_source_missing");
++  if (!derived && independent) return fail("reason_source_unexpected");
++  if (derived && independent && *derived != *independent) {
++    return fail("reason_source_mismatch");
++  }
++
++  if (argv != nullptr) *argv = std::move(argv_args);
++  if (bcb != nullptr) *bcb = std::move(bcb_args);
++  if (derived_reason != nullptr) *derived_reason = derived;
++  return true;
++}
++
++}  // namespace
++
++const char* ToString(State state) {
++  switch (state) {
++    case State::kBlocked: return "BLOCKED";
++    case State::kIdleClean: return "IDLE_CLEAN";
++    case State::kNormalPending: return "NORMAL_PENDING";
++    case State::kCommitting: return "COMMITTING";
++    case State::kCommitted: return "COMMITTED";
++    case State::kErrorHold: return "ERROR_HOLD";
++  }
++  return "ERROR_HOLD";
++}
++
++const char* ToString(Result result) {
++  switch (result) {
++    case Result::kBlockedCapture: return "BLOCKED_CAPTURE";
++    case Result::kIdleClean: return "IDLE_CLEAN";
++    case Result::kNormalAcceptedWakeTopMenu: return "NORMAL_ACCEPTED_WAKE_TOP_MENU";
++    case Result::kRejectedAuth: return "REJECTED_AUTH";
++    case Result::kRejectedFrame: return "REJECTED_FRAME";
++    case Result::kRejectedBusy: return "REJECTED_BUSY";
++    case Result::kRejectedRepeat: return "REJECTED_REPEAT";
++    case Result::kRejectedClosed: return "REJECTED_CLOSED";
++    case Result::kRejectedStaleWindow: return "REJECTED_STALE_WINDOW";
++    case Result::kRejectedStaleToken: return "REJECTED_STALE_TOKEN";
++    case Result::kCommitCancelledWindow: return "COMMIT_CANCELLED_WINDOW";
++    case Result::kCommittedNotBootValidated: return "COMMITTED_NOT_BOOT_VALIDATED";
++    case Result::kErrorHold: return "ERROR_HOLD";
++  }
++  return "ERROR_HOLD";
++}
++
++std::string_view StatusLine(State state) {
++  switch (state) {
++    case State::kBlocked: return "STATUS/1 BLOCKED\n";
++    case State::kIdleClean: return "STATUS/1 IDLE_CLEAN\n";
++    case State::kNormalPending: return "STATUS/1 NORMAL_PENDING\n";
++    case State::kCommitting: return "STATUS/1 COMMITTING\n";
++    case State::kCommitted: return "STATUS/1 COMMITTED\n";
++    case State::kErrorHold: return "STATUS/1 ERROR_HOLD\n";
++  }
++  return "STATUS/1 ERROR_HOLD\n";
++}
++
++bool CaptureIsClean(const Capture& capture, std::string* why) {
++  return Evaluate(capture, nullptr, nullptr, nullptr, why);
++}
++
++std::string CaptureKey(const Capture& capture) {
++  ParsedArgs argv_args;
++  ParsedArgs bcb_args;
++  std::optional<Reason> reason;
++  if (!Evaluate(capture, &argv_args, &bcb_args, &reason, nullptr)) return {};
++
++  std::string key;
++  key += capture.bcb.command.empty() ? "C0" : "C1";
++  key += capture.bcb.recovery.empty() ? "R0" : "R1";
++  key += argv_args.show_text ? "t" : "-";
++  key += bcb_args.show_text ? "t" : "-";
++  key += reason ? std::to_string(static_cast<int>(*reason)) : "n";
++  key += '|';
++  for (const auto& arg : argv_args.args) {
++    key += arg;
++    key += '\x1f';
++  }
++  key += '|';
++  for (const auto& arg : bcb_args.args) {
++    key += arg;
++    key += '\x1f';
++  }
++  return key;
++}
++
++bool IsTrustedAdbd(const PeerCredentials& peer) {
++  return peer.getcred_ok && peer.getsec_ok && peer.uid == 2000 &&
++         peer.sid == "u:r:adbd:s0";
++}
++
++bool IsNormalFrame(FrameRead read, std::string_view frame) {
++  if (read != FrameRead::kOk) return false;
++  if (frame.size() > kMaxFrameBytes) return false;
++  return frame == kNormalFrame;
++}
++
++Coordinator::Coordinator(Capture initial, Hooks hooks)
++    : hooks_(std::move(hooks)) {
++  if (CaptureIsClean(initial)) {
++    initial_key_ = CaptureKey(initial);
++    state_ = State::kIdleClean;
++  } else {
++    state_ = State::kBlocked;
++  }
++}
++
++State Coordinator::state() const {
++  std::lock_guard<std::mutex> lock(mu_);
++  return state_;
++}
++
++bool Coordinator::top_menu_open() const {
++  std::lock_guard<std::mutex> lock(mu_);
++  return top_menu_open_;
++}
++
++std::uint64_t Coordinator::generation() const {
++  std::lock_guard<std::mutex> lock(mu_);
++  return generation_;
++}
++
++std::uint64_t Coordinator::pending_token() const {
++  std::lock_guard<std::mutex> lock(mu_);
++  return pending_token_;
++}
++
++Result Coordinator::EnterTopMenu() {
++  std::lock_guard<std::mutex> lock(mu_);
++  switch (state_) {
++    case State::kBlocked: return Result::kBlockedCapture;
++    case State::kCommitted: return Result::kCommittedNotBootValidated;
++    case State::kErrorHold: return Result::kErrorHold;
++    case State::kCommitting: return Result::kRejectedBusy;
++    case State::kNormalPending:
++      if (top_menu_open_) return Result::kRejectedBusy;
++      break;
++    case State::kIdleClean:
++      if (top_menu_open_) return Result::kRejectedBusy;
++      break;
++  }
++  top_menu_open_ = true;
++  peer_closed_ = false;
++  ++generation_;
++  return Result::kIdleClean;
++}
++
++Result Coordinator::LeaveTopMenu() {
++  std::lock_guard<std::mutex> lock(mu_);
++  if (state_ == State::kCommitting) return Result::kRejectedBusy;
++  top_menu_open_ = false;
++  ++generation_;
++  if (state_ == State::kNormalPending) {
++    state_ = State::kIdleClean;
++    pending_token_ = 0;
++    return Result::kCommitCancelledWindow;
++  }
++  switch (state_) {
++    case State::kBlocked: return Result::kBlockedCapture;
++    case State::kIdleClean: return Result::kIdleClean;
++    case State::kCommitted: return Result::kCommittedNotBootValidated;
++    case State::kErrorHold: return Result::kErrorHold;
++    case State::kNormalPending:
++    case State::kCommitting:
++      break;
++  }
++  return Result::kRejectedBusy;
++}
++
++RequestOutcome Coordinator::RequestNormal(const PeerCredentials& peer, FrameRead read,
++                                          std::string_view frame,
++                                          std::uint64_t observed_generation) {
++  if (!IsNormalFrame(read, frame)) return {Result::kRejectedFrame, false};
++  if (!IsTrustedAdbd(peer)) return {Result::kRejectedAuth, false};
++
++  std::lock_guard<std::mutex> lock(mu_);
++  switch (state_) {
++    case State::kBlocked:
++      return {Result::kBlockedCapture, false};
++    case State::kNormalPending:
++      return {Result::kRejectedRepeat, false};
++    case State::kCommitting:
++    case State::kCommitted:
++    case State::kErrorHold:
++      return {Result::kRejectedBusy, false};
++    case State::kIdleClean:
++      break;
++  }
++  if (!top_menu_open_) return {Result::kRejectedClosed, false};
++  if (observed_generation != generation_) {
++    return {Result::kRejectedStaleWindow, false};
++  }
++  pending_token_ = next_token_++;
++  peer_closed_ = false;
++  state_ = State::kNormalPending;
++  return {Result::kNormalAcceptedWakeTopMenu, true};
++}
++
++CommitOutcome Coordinator::Hold(bool cleanup_started, bool reply_sent) {
++  {
++    std::lock_guard<std::mutex> lock(mu_);
++    state_ = State::kErrorHold;
++    top_menu_open_ = false;
++    pending_token_ = 0;
++    ++generation_;
++  }
++  return {Result::kErrorHold, cleanup_started, reply_sent, false};
++}
++
++CommitOutcome Coordinator::ConfirmCommit(std::uint64_t observed_generation,
++                                         std::uint64_t token) {
++  {
++    std::lock_guard<std::mutex> lock(mu_);
++    switch (state_) {
++      case State::kBlocked: return {Result::kBlockedCapture, false, false, false};
++      case State::kErrorHold: return {Result::kErrorHold, false, false, false};
++      case State::kCommitting:
++      case State::kCommitted:
++      case State::kIdleClean:
++        return {Result::kRejectedBusy, false, false, false};
++      case State::kNormalPending:
++        break;
++    }
++    if (!top_menu_open_ || observed_generation != generation_) {
++      state_ = State::kIdleClean;
++      top_menu_open_ = false;
++      pending_token_ = 0;
++      ++generation_;
++      return {Result::kCommitCancelledWindow, false, false, false};
++    }
++    if (token != pending_token_) {
++      return {Result::kRejectedStaleToken, false, false, false};
++    }
++    state_ = State::kCommitting;
++  }
++
++  auto peer_closed = [this] {
++    std::lock_guard<std::mutex> lock(mu_);
++    return peer_closed_;
++  };
++
++  bool cleanup_started = false;
++  bool reply_sent = false;
++
++  if (peer_closed()) return Hold(cleanup_started, reply_sent);
++  if (!hooks_.read_fresh) return Hold(cleanup_started, reply_sent);
++  const FreshCapture fresh = hooks_.read_fresh();
++  if (!fresh.ok) return Hold(cleanup_started, reply_sent);
++  if (!CaptureIsClean(fresh.capture) ||
++      CaptureKey(fresh.capture) != initial_key_) {
++    return Hold(cleanup_started, reply_sent);
++  }
++  if (peer_closed()) return Hold(cleanup_started, reply_sent);
++
++  cleanup_started = true;
++  if (!hooks_.standard_clear) return Hold(cleanup_started, reply_sent);
++  const ClearResult cleared = hooks_.standard_clear();
++  if (!cleared.ok || !cleared.wrote || !cleared.fsync_ok) {
++    return Hold(cleanup_started, reply_sent);
++  }
++
++  // After a successful clear, still re-read and check the command state even
++  // if the peer closed; this records the post-clear state without any reply or
++  // reboot. Never restore the old BCB.
++  if (!hooks_.readback_verify) return Hold(cleanup_started, reply_sent);
++  const ReadbackResult readback = hooks_.readback_verify();
++  if (!readback.ok || !readback.read_ok || !readback.clean) {
++    return Hold(cleanup_started, reply_sent);
++  }
++
++  if (!hooks_.command_cleanup_status) return Hold(cleanup_started, reply_sent);
++  const BoolResult command = hooks_.command_cleanup_status();
++  if (!command.ok || !command.value) return Hold(cleanup_started, reply_sent);
++
++  if (peer_closed()) return Hold(cleanup_started, reply_sent);
++  if (!hooks_.send_reply) return Hold(cleanup_started, reply_sent);
++  const ReplyResult reply = hooks_.send_reply(kCommittedLine);
++  if (!reply.ok || !reply.sent) return Hold(cleanup_started, reply_sent);
++  reply_sent = true;
++
++  {
++    std::lock_guard<std::mutex> lock(mu_);
++    state_ = State::kCommitted;
++  }
++
++  if (peer_closed()) return Hold(cleanup_started, reply_sent);
++  if (!hooks_.eligible_device_reboot) return Hold(cleanup_started, reply_sent);
++  const RebootResult reboot = hooks_.eligible_device_reboot();
++  if (!reboot.ok || !reboot.requested) return Hold(cleanup_started, reply_sent);
++
++  return {Result::kCommittedNotBootValidated, true, true, true};
++}
++
++void Coordinator::OnPeerClosed() {
++  std::lock_guard<std::mutex> lock(mu_);
++  peer_closed_ = true;
++  if (state_ == State::kNormalPending) {
++    // A pending client that disappears is an error, not a silent retry:
++    // no cleanup is run and the session holds without a reboot.
++    state_ = State::kErrorHold;
++    top_menu_open_ = false;
++    pending_token_ = 0;
++    ++generation_;
++  }
++}
++
++}  // namespace rothko::recovery
+diff --git a/normal_exit/normal_exit.h b/normal_exit/normal_exit.h
+new file mode 100644
+index 00000000..47b4cdc0
+--- /dev/null
++++ b/normal_exit/normal_exit.h
+@@ -0,0 +1,214 @@
++// SPDX-FileCopyrightText: The LineageOS Project
++// SPDX-License-Identifier: Apache-2.0
++//
++// Normal-exit coordinator core for OEM recovery's adbd-triggered path.
++//
++// This is a production-intended core, not a toy model: the capture validator,
++// state machine, peer authentication, frame parser, cleanup order and failure
++// handling are the logic the real recovery adapter must reuse. The adapter is
++// deliberately thin: it reads BCB/argv/commandfile/reason/stage before
++// get_args() mutates them, supplies the fixed adbd credentials, and implements
++// the cleanup hooks with the real recovery primitives.
++//
++// REVIEW-ONLY: the adbd daemon UID/SID, the OEM ELF localreserved path and the
++// actual transport authentication still need parent evidence. A 2000/adbd
++// credential set proves only that the peer is the trusted adbd process.
++//
++// No Android headers, no UI, no filesystem writes, no signing.
++
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <functional>
++#include <mutex>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace rothko::recovery {
++
++inline constexpr std::string_view kNormalFrame = "ROTHKO-NORMAL/1\n";
++inline constexpr std::string_view kAcceptedLine = "ROTHKO-NORMAL/1 ACCEPTED\n";
++inline constexpr std::string_view kRejectedLine = "ROTHKO-NORMAL/1 REJECTED\n";
++inline constexpr std::string_view kCommittedLine = "COMMITTED\n";
++inline constexpr std::size_t kMaxFrameBytes = 32;
++
++enum class State {
++  kBlocked,
++  kIdleClean,
++  kNormalPending,
++  kCommitting,
++  kCommitted,
++  kErrorHold,
++};
++
++enum class Result {
++  kBlockedCapture,
++  kIdleClean,
++  kNormalAcceptedWakeTopMenu,
++  kRejectedAuth,
++  kRejectedFrame,
++  kRejectedBusy,
++  kRejectedRepeat,
++  kRejectedClosed,
++  kRejectedStaleWindow,
++  kRejectedStaleToken,
++  kCommitCancelledWindow,
++  kCommittedNotBootValidated,
++  kErrorHold,
++};
++
++enum class ReadStatus { kOk, kError };
++enum class CommandFile { kAbsent, kPresent, kError };
++enum class FrameRead { kOk, kEmpty, kTruncated, kOversize, kUnknown, kTimeout, kClosed };
++enum class Reason { kUserRequested, kAdb, kRecoveryUi };
++
++const char* ToString(State state);
++const char* ToString(Result result);
++std::string_view StatusLine(State state);  // fixed STATUS/1 <state>\n, no BCB data
++
++struct BcbView {
++  std::string command;
++  std::string status;
++  std::string recovery;
++  std::string stage;
++  bool reserved_zero = false;
++};
++
++struct Capture {
++  bool captured_before_get_args = false;
++  ReadStatus argv_status = ReadStatus::kError;
++  std::vector<std::string> argv;
++  ReadStatus bcb_status = ReadStatus::kError;
++  BcbView bcb;
++  CommandFile commandfile = CommandFile::kError;
++  ReadStatus reason_status = ReadStatus::kError;
++  std::optional<std::string> reason;
++  ReadStatus stage_status = ReadStatus::kError;
++  std::optional<std::string> stage;
++};
++
++struct PeerCredentials {
++  bool getcred_ok = false;
++  std::uint32_t uid = 0;
++  bool getsec_ok = false;
++  std::string sid;
++};
++
++struct FreshCapture {
++  bool ok = false;
++  Capture capture;
++};
++
++struct ClearResult {
++  bool ok = false;
++  bool wrote = false;
++  bool fsync_ok = false;
++};
++
++struct ReadbackResult {
++  bool ok = false;
++  bool read_ok = false;
++  bool clean = false;
++};
++
++struct BoolResult {
++  bool ok = false;
++  bool value = false;
++};
++
++struct ReplyResult {
++  bool ok = false;
++  bool sent = false;
++};
++
++struct RebootResult {
++  bool ok = false;
++  bool requested = false;  // only Device::REBOOT eligibility, never sys.powerctl
++};
++
++struct Hooks {
++  std::function<FreshCapture()> read_fresh;
++  std::function<ClearResult()> standard_clear;
++  std::function<ReadbackResult()> readback_verify;
++  std::function<BoolResult()> command_cleanup_status;  // verify absence only; never unlink
++  std::function<ReplyResult(std::string_view)> send_reply;
++  std::function<RebootResult()> eligible_device_reboot;
++};
++
++struct RequestOutcome {
++  Result result = Result::kRejectedBusy;
++  bool should_wake_top_menu = false;
++};
++
++struct CommitOutcome {
++  Result result = Result::kRejectedBusy;
++  bool cleanup_started = false;
++  bool reply_sent = false;
++  bool reboot_requested = false;
++};
++
++// Pure conservative capture validator. On failure, *why (if non-null) is a
++// fixed reason token and never contains BCB/argv/user data.
++bool CaptureIsClean(const Capture& capture, std::string* why = nullptr);
++
++// Internal decision fingerprint; only clean captures have a non-empty key.
++// It contains normalized allowed enum/arg tokens, never unknown BCB content.
++std::string CaptureKey(const Capture& capture);
++
++bool IsTrustedAdbd(const PeerCredentials& peer);
++bool IsNormalFrame(FrameRead read, std::string_view frame);
++
++class Coordinator {
++ public:
++  Coordinator(Capture initial, Hooks hooks);
++
++  Coordinator(const Coordinator&) = delete;
++  Coordinator& operator=(const Coordinator&) = delete;
++
++  State state() const;
++  bool top_menu_open() const;
++  std::uint64_t generation() const;
++  std::uint64_t pending_token() const;
++
++  // The top menu window is the only place a normal request may be accepted.
++  // Leaving the window (any update/wipe/sideload/submenu) invalidates the
++  // generation and drops a pending request without cleanup.
++  Result EnterTopMenu();
++  Result LeaveTopMenu();
++
++  // frame must be exactly kNormalFrame. observed_generation is the generation
++  // the socket handler saw for the current top-menu window.
++  RequestOutcome RequestNormal(const PeerCredentials& peer, FrameRead read,
++                               std::string_view frame,
++                               std::uint64_t observed_generation);
++
++  // Re-reads every source via hooks.read_fresh(), revalidates it and compares
++  // the decision key with the initial capture before touching BCB. Any
++  // failure => ERROR_HOLD; no old-BCB fallback and no automatic retry.
++  CommitOutcome ConfirmCommit(std::uint64_t observed_generation,
++                              std::uint64_t token);
++
++  // Call when the accepted client socket closes. Before COMMITTING this moves
++  // a pending request to ERROR_HOLD with zero cleanup. During COMMITTING it
++  // records the close flag; ConfirmCommit rechecks it before standard_clear
++  // (zero cleanup if already closed) and before reply/reboot (no reboot).
++  void OnPeerClosed();
++
++ private:
++  CommitOutcome Hold(bool cleanup_started, bool reply_sent);
++
++  mutable std::mutex mu_;
++  std::string initial_key_;
++  Hooks hooks_;
++  State state_;
++  bool top_menu_open_ = false;
++  std::uint64_t generation_ = 0;
++  std::uint64_t next_token_ = 1;
++  std::uint64_t pending_token_ = 0;
++  bool peer_closed_ = false;
++};
++
++}  // namespace rothko::recovery
+diff --git a/normal_exit/normal_exit_posix.cpp b/normal_exit/normal_exit_posix.cpp
+new file mode 100644
+index 00000000..6174fd60
+--- /dev/null
++++ b/normal_exit/normal_exit_posix.cpp
+@@ -0,0 +1,138 @@
++// SPDX-FileCopyrightText: The LineageOS Project
++// SPDX-License-Identifier: Apache-2.0
++
++#ifndef _GNU_SOURCE
++#define _GNU_SOURCE
++#endif
++
++#include "normal_exit_posix.h"
++
++#include <poll.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <cerrno>
++#include <chrono>
++#include <cstring>
++#include <string>
++
++#ifndef SO_PEERSEC
++#define SO_PEERSEC 31
++#endif
++
++namespace rothko::recovery {
++namespace {
++
++int RemainingMs(std::chrono::steady_clock::time_point deadline) {
++  const auto now = std::chrono::steady_clock::now();
++  if (now >= deadline) return 0;
++  const auto remain =
++      std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
++  return remain <= 0 ? 1 : static_cast<int>(std::min<long long>(remain, 10000));
++}
++
++}  // namespace
++
++PeerIdentity ReadPeerIdentity(int fd) {
++  PeerIdentity peer;
++  struct ucred cred {};
++  socklen_t cred_len = sizeof(cred);
++  if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) == 0 &&
++      cred_len == sizeof(cred)) {
++    peer.getcred_ok = true;
++    peer.uid = cred.uid;
++  }
++
++  char sid[4096] = {};
++  socklen_t sid_len = sizeof(sid);
++  if (getsockopt(fd, SOL_SOCKET, SO_PEERSEC, sid, &sid_len) == 0) {
++    const std::size_t len = strnlen(sid, sizeof(sid));
++    peer.getsec_ok = true;
++    peer.sid.assign(sid, len);
++  }
++  return peer;
++}
++
++bool AuthorizePeer(const PeerIdentity& peer, std::string* why) {
++  PeerCredentials cred;
++  cred.getcred_ok = peer.getcred_ok;
++  cred.uid = static_cast<std::uint32_t>(peer.uid);
++  cred.getsec_ok = peer.getsec_ok;
++  cred.sid = peer.sid;
++  if (!IsTrustedAdbd(cred)) {
++    if (why != nullptr) *why = "peer_not_trusted_adbd";
++    return false;
++  }
++  return true;
++}
++
++FrameReadResult ReadNormalFrame(int fd, int timeout_ms) {
++  if (timeout_ms <= 0) return {FrameRead::kTimeout, {}};
++  const auto deadline =
++      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
++  std::string line;
++
++  for (;;) {
++    const int remain = RemainingMs(deadline);
++    if (remain <= 0) return {FrameRead::kTimeout, line};
++
++    struct pollfd pfd {};
++    pfd.fd = fd;
++    pfd.events = POLLIN;
++    const int polled = poll(&pfd, 1, remain);
++    if (polled == 0) return {FrameRead::kTimeout, line};
++    if (polled < 0) {
++      if (errno == EINTR) continue;
++      return {FrameRead::kUnknown, line};
++    }
++
++    char ch = 0;
++    const ssize_t got = recv(fd, &ch, 1, MSG_DONTWAIT);
++    if (got < 0) {
++      if (errno == EINTR) continue;
++      if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
++      return {FrameRead::kUnknown, line};
++    }
++    if (got == 0) {
++      return {line.empty() ? FrameRead::kClosed : FrameRead::kTruncated, line};
++    }
++    line.push_back(ch);
++    if (ch == '\n') return {FrameRead::kOk, line};
++    if (line.size() > kMaxFrameBytes) {
++      return {FrameRead::kOversize, line.substr(0, kMaxFrameBytes)};
++    }
++  }
++}
++
++bool WriteAll(int fd, std::string_view data, int timeout_ms) {
++  if (timeout_ms <= 0) return false;
++  const auto deadline =
++      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
++  std::size_t offset = 0;
++  while (offset < data.size()) {
++    const int remain = RemainingMs(deadline);
++    if (remain <= 0) return false;
++    struct pollfd pfd {};
++    pfd.fd = fd;
++    pfd.events = POLLOUT;
++    const int polled = poll(&pfd, 1, remain);
++    if (polled == 0) return false;
++    if (polled < 0) {
++      if (errno == EINTR) continue;
++      return false;
++    }
++    const ssize_t wrote =
++        send(fd, data.data() + offset, data.size() - offset, MSG_DONTWAIT);
++    if (wrote < 0) {
++      if (errno == EINTR) continue;
++      if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
++      return false;
++    }
++    if (wrote == 0) return false;
++    offset += static_cast<std::size_t>(wrote);
++  }
++  return true;
++}
++
++}  // namespace rothko::recovery
+diff --git a/normal_exit/normal_exit_posix.h b/normal_exit/normal_exit_posix.h
+new file mode 100644
+index 00000000..3a2c3c47
+--- /dev/null
++++ b/normal_exit/normal_exit_posix.h
+@@ -0,0 +1,50 @@
++// SPDX-FileCopyrightText: The LineageOS Project
++// SPDX-License-Identifier: Apache-2.0
++//
++// Thin real POSIX boundary for the normal-exit core.
++//
++// Only socket credential reads, finite-deadline poll/recv and finite-deadline
++// send. No exec, no filesystem, no properties, no BCB access, no shell.
++// The production recovery adapter owns the actual accepted Unix socket; this
++// file is host-testable and does not create/listen on any socket.
++
++#pragma once
++
++#include <sys/types.h>
++
++#include <string>
++#include <string_view>
++
++#include "normal_exit.h"
++
++namespace rothko::recovery {
++
++struct PeerIdentity {
++  bool getcred_ok = false;
++  uid_t uid = 0;
++  bool getsec_ok = false;
++  std::string sid;
++};
++
++// SO_PEERCRED + SO_PEERSEC; any getsockopt failure is reported as such.
++PeerIdentity ReadPeerIdentity(int fd);
++
++// Fixed production rule: UID 2000 (non-root) and exact SID u:r:adbd:s0.
++// This only authorizes the trusted adbd process, not transport auth.
++bool AuthorizePeer(const PeerIdentity& peer, std::string* why = nullptr);
++
++struct FrameReadResult {
++  FrameRead status = FrameRead::kUnknown;
++  std::string line;
++};
++
++// One-shot fixed-frame read. One monotonic total deadline covers every poll
++// and recv; the deadline is never reset between fragments. At most 32 bytes
++// are retained; a longer line is OVERSIZE. EOF with a partial line is
++// TRUNCATED, EOF with no bytes is CLOSED.
++FrameReadResult ReadNormalFrame(int fd, int timeout_ms);
++
++// Optional fixed-line reply helper with the same total-deadline rule.
++bool WriteAll(int fd, std::string_view data, int timeout_ms);
++
++}  // namespace rothko::recovery
+diff --git a/otautil/include/otautil/normal_exit_phase.h b/otautil/include/otautil/normal_exit_phase.h
+new file mode 100644
+index 00000000..db802248
+--- /dev/null
++++ b/otautil/include/otautil/normal_exit_phase.h
+@@ -0,0 +1,32 @@
++// SPDX-License-Identifier: Apache-2.0
++// Diagnostic only. Fixed phases on the existing normal-exit path; not a hang fix.
++#pragma once
++
++#include <atomic>
++#include <cstddef>
++#include <android-base/logging.h>
++
++namespace rothko::recovery::postcommit {
++
++// Inline variable is shared by recovery_main/librecovery/libotautil in the
++// recovery executable (librecovery and libotautil are static libraries).
++inline std::atomic<bool> g_reply_observed{false};
++
++// Only the main-thread hook calls this, after the real COMMITTED write reports
++// success. Observation does NOT mean final eligibility, reboot, or boot success.
++inline void ObserveCommittedReply() {
++  g_reply_observed.store(true, std::memory_order_relaxed);
++}
++
++// Accept literal arrays only. Call sites below contain fixed, non-sensitive
++// tokens, never argv/BCB/path/SID/property values or peer-supplied text.
++// No device/file read, new sink, flush/fsync, retry, or control-flow side effect.
++// INFO avoids UiLogger's ERROR -> ui->Print path while diagnosing UI/volmgr.
++template <std::size_t N>
++inline void Phase(const char (&phase)[N]) {
++  if (g_reply_observed.load(std::memory_order_relaxed)) {
++    LOG(INFO) << "rothko-normal-exit-phase/1 " << phase;
++  }
++}
++
++}  // namespace rothko::recovery::postcommit
+diff --git a/otautil/sysutil.cpp b/otautil/sysutil.cpp
+index 2c7752e9..a0f50dce 100644
+--- a/otautil/sysutil.cpp
++++ b/otautil/sysutil.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "otautil/sysutil.h"
++#include "otautil/normal_exit_phase.h"
+ 
+ #include <errno.h>  // TEMP_FAILURE_RETRY
+ #include <fcntl.h>
+@@ -220,16 +221,25 @@ MemMapping::~MemMapping() {
+ }
+ 
+ void Reboot(std::string_view target) {
++  rothko::recovery::postcommit::Phase("standard_reboot.enter");
+   std::string cmd = "reboot," + std::string(target);
+   // Honor the quiescent mode if applicable.
++  rothko::recovery::postcommit::Phase("quiescent_property.before");
+   if (target != "bootloader" && target != "fastboot" &&
+       android::base::GetBoolProperty("ro.boot.quiescent", false)) {
+     cmd += ",quiescent";
+   }
++  rothko::recovery::postcommit::Phase("quiescent_property.after");
++  rothko::recovery::postcommit::Phase("powerctl_set.before");
+   if (!android::base::SetProperty(ANDROID_RB_PROPERTY, cmd)) {
++    rothko::recovery::postcommit::Phase("powerctl_set.failed");
+     LOG(FATAL) << "Reboot failed";
+   }
++  rothko::recovery::postcommit::Phase("powerctl_set.after");
+ 
++  // Reboot is noreturn. A successful SetProperty only hands off to init; it
++  // proves neither shutdown completion nor the next boot. No synthetic after.
++  rothko::recovery::postcommit::Phase("standard_reboot.wait_for_init");
+   while (true) pause();
+ }
+ 
+diff --git a/own_attr_context.h b/own_attr_context.h
+new file mode 100644
+index 00000000..b456a12b
+--- /dev/null
++++ b/own_attr_context.h
+@@ -0,0 +1,135 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stddef.h>
++#include <string.h>
++#include <unistd.h>
++
++// Shared, bounded reader for the process's own SELinux context.
++//
++// /proc/self/attr/current is a regular proc attribute, NOT a symlink: it must
++// be opened and read, never readlink()ed.  The reader is read-only
++// (O_RDONLY|O_CLOEXEC), bounded, short-read aware, and never consults argv, the
++// environment, a property or a caller-supplied file.  Both the static launcher
++// and the earliest-main guard use this same helper.
++namespace rothko::recovery::own_attr {
++
++inline constexpr const char kRecoveryContext[] = "u:r:recovery:s0";
++inline constexpr size_t kMaxBytes = 96;
++
++enum class Status : int {
++  kExact = 0,
++  kOpenFailed,
++  kReadFailed,
++  kEmpty,
++  kTooLong,
++  kMalformed,
++};
++
++struct Context {
++  Status status = Status::kReadFailed;
++  char value[kMaxBytes] = {};
++};
++
++namespace detail {
++
++inline constexpr size_t kExpectedLength = sizeof(kRecoveryContext) - 1;
++
++inline bool IsTerminator(char value) {
++  return value == '\0' || value == '\n';
++}
++
++}  // namespace detail
++
++// Accepted: exactly "u:r:recovery:s0", optionally followed by one NUL or one
++// newline.  Everything else fails closed.
++inline Context Parse(const char* raw, size_t length) {
++  Context out{};
++  if (raw == nullptr || length == 0) {
++    out.status = Status::kEmpty;
++    return out;
++  }
++  if (length >= kMaxBytes) {
++    out.status = Status::kTooLong;
++    return out;
++  }
++  if (length < detail::kExpectedLength) {
++    out.status = Status::kMalformed;
++    return out;
++  }
++  for (size_t i = 0; i < detail::kExpectedLength; ++i) {
++    if (raw[i] != kRecoveryContext[i]) {
++      out.status = Status::kMalformed;
++      return out;
++    }
++  }
++  if (length == detail::kExpectedLength) {
++    // exact, no terminator
++  } else if (length == detail::kExpectedLength + 1 &&
++             detail::IsTerminator(raw[detail::kExpectedLength])) {
++    // exactly one trailing NUL or newline
++  } else {
++    out.status = Status::kMalformed;
++    return out;
++  }
++  memcpy(out.value, kRecoveryContext, detail::kExpectedLength);
++  out.value[detail::kExpectedLength] = '\0';
++  out.status = Status::kExact;
++  return out;
++}
++
++inline Context Read() {
++  Context out{};
++  const int fd = open("/proc/self/attr/current", O_RDONLY | O_CLOEXEC);
++  if (fd < 0) {
++    out.status = Status::kOpenFailed;
++    return out;
++  }
++
++  char raw[kMaxBytes + 1] = {};
++  size_t total = 0;
++  for (;;) {
++    const ssize_t n = read(fd, raw + total, sizeof(raw) - total);
++    if (n < 0) {
++      if (errno == EINTR) continue;
++      out.status = Status::kReadFailed;
++      close(fd);
++      return out;
++    }
++    if (n == 0) break;
++    total += static_cast<size_t>(n);
++    if (total == sizeof(raw)) {
++      // Buffer filled: the attribute may be truncated.  Refuse rather than
++      // parse a prefix.
++      out.status = Status::kTooLong;
++      close(fd);
++      return out;
++    }
++  }
++  close(fd);
++
++  if (total == 0) {
++    out.status = Status::kEmpty;
++    return out;
++  }
++  return Parse(raw, total);
++}
++
++}  // namespace rothko::recovery::own_attr
+diff --git a/recovery.cpp b/recovery.cpp
+index 44c7261f..9137af76 100644
+--- a/recovery.cpp
++++ b/recovery.cpp
+@@ -56,6 +56,8 @@
+ #include "otautil/package.h"
+ #include "otautil/paths.h"
+ #include "otautil/sysutil.h"
++#include "otautil/normal_exit_phase.h"
++#include "recovery_normal_exit_bridge.h"
+ #include "recovery_ui/screen_ui.h"
+ #include "recovery_ui/ui.h"
+ #include "recovery_utils/battery_utils.h"
+@@ -130,8 +132,21 @@ static bool IsRoDebuggable() {
+ // Clear the recovery command and prepare to boot a (hopefully working) system,
+ // copy our log file to cache as well (for the system to read). This function is
+ // idempotent: call it as many times as you like.
+-static void FinishRecovery(RecoveryUI* ui) {
++//
++// The result exposes every real outcome. Failure is still logged exactly as
++// before; it is never converted into an assumed success.
++RecoveryCleanupResult FinishRecoveryChecked(RecoveryUI* ui, RecoveryFinishMode mode) {
++  RecoveryCleanupResult result;
++  rothko::recovery::postcommit::Phase("finish_security.before");
++  if (!rothko::recovery::bridge::SecurityReadyForOperation()) {
++    rothko::recovery::postcommit::Phase("finish_security.hold");
++    return result;
++  }
++  rothko::recovery::postcommit::Phase("finish_security.after");
++  rothko::recovery::postcommit::Phase("get_locale.before");
+   std::string locale = ui->GetLocale();
++  rothko::recovery::postcommit::Phase("get_locale.after");
++  rothko::recovery::postcommit::Phase("save_locale.before");
+   // Save the locale to cache, so if recovery is next started up without a '--locale' argument
+   // (e.g., directly from the bootloader) it will use the last-known locale.
+   if (!locale.empty() && HasCache()) {
+@@ -140,26 +155,69 @@ static void FinishRecovery(RecoveryUI* ui) {
+       LOG(ERROR) << "Failed to mount " << LOCALE_FILE;
+     } else if (!android::base::WriteStringToFile(locale, LOCALE_FILE)) {
+       PLOG(ERROR) << "Failed to save locale to " << LOCALE_FILE;
++    } else {
++      result.locale_saved = true;
+     }
++  } else {
++    result.locale_saved = true;  // Nothing to save.
+   }
+ 
++  rothko::recovery::postcommit::Phase("save_locale.after");
++  rothko::recovery::postcommit::Phase("copy_logs.before");
+   copy_logs(save_current_log);
++  rothko::recovery::postcommit::Phase("copy_logs.after");
++  result.logs_copied = true;
+ 
+   // Reset to normal system boot so recovery won't cycle indefinitely.
+-  std::string err;
+-  if (!clear_bootloader_message(&err)) {
+-    LOG(ERROR) << "Failed to clear BCB message: " << err;
++  if (mode == RecoveryFinishMode::kFull) {
++    result.clear_attempted = true;
++    std::string err;
++    rothko::recovery::postcommit::Phase("standard_clear.before");
++    if (!clear_bootloader_message(&err)) {
++      LOG(ERROR) << "Failed to clear BCB message: " << err;
++    } else {
++      // clear_bootloader_message() performs the standard write and fsync in one
++      // standard-bootloader_message operation.
++      result.bcb_cleared = true;
++    }
++    rothko::recovery::postcommit::Phase("standard_clear.after");
+   }
+ 
+-  // Remove the command file, so recovery won't repeat indefinitely.
+-  if (HasCache()) {
+-    if (ensure_path_mounted(COMMAND_FILE) != 0 || (unlink(COMMAND_FILE) && errno != ENOENT)) {
+-      LOG(WARNING) << "Can't unlink " << COMMAND_FILE;
++  if (mode == RecoveryFinishMode::kFull || mode == RecoveryFinishMode::kTailAndCommand) {
++    // Remove the command file, so recovery won't repeat indefinitely.
++    rothko::recovery::postcommit::Phase("command_cleanup.before");
++    if (HasCache()) {
++      if (ensure_path_mounted(COMMAND_FILE) != 0 || (unlink(COMMAND_FILE) && errno != ENOENT)) {
++        LOG(WARNING) << "Can't unlink " << COMMAND_FILE;
++      } else {
++        result.command_removed = true;
++      }
++      rothko::recovery::postcommit::Phase("cache_unmount.before");
++      ensure_path_unmounted(CACHE_ROOT);
++      rothko::recovery::postcommit::Phase("cache_unmount.after");
++    } else {
++      result.command_removed = true;  // No /cache => no command file.
+     }
+-    ensure_path_unmounted(CACHE_ROOT);
++    rothko::recovery::postcommit::Phase("command_cleanup.after");
+   }
+ 
++  rothko::recovery::postcommit::Phase("finish_sync.before");
+   sync();  // For good measure.
++  rothko::recovery::postcommit::Phase("finish_sync.after");
++  result.synced = true;
++  return result;
++}
++
++static void FinishRecovery(RecoveryUI* ui) {
++  // A verified normal-exit clear already ran on the main thread; save the
++  // locale/log tail and still perform the standard command-file cleanup, but do
++  // not clear the (already empty) BCB a second time.
++  rothko::recovery::postcommit::Phase("consume_verified_clear.before");
++  const RecoveryFinishMode mode = rothko::recovery::bridge::ConsumeVerifiedClear()
++                                      ? RecoveryFinishMode::kTailAndCommand
++                                      : RecoveryFinishMode::kFull;
++  rothko::recovery::postcommit::Phase("consume_verified_clear.after");
++  (void)FinishRecoveryChecked(ui, mode);
+ }
+ 
+ static bool yes_no(Device* device, const char* question1, const char* question2) {
+@@ -490,8 +548,16 @@ static bool AskToReboot(Device* device, Device::BuiltinAction chosen_action) {
+ static Device::BuiltinAction PromptAndWait(Device* device, InstallResult status) {
+   auto ui = device->GetUI();
+   bool update_in_progress = (device->GetReason().value_or("") == "update_in_progress");
++  bool main_menu = true;
+   for (;;) {
+-    FinishRecovery(ui);
++    // Normal-exit adapter: defer the BCB clear while the adapter is armed so the
++    // pre-get_args capture and the commit fresh read describe the same BCB. A
++    // blocked capture also never erases the pending work it is protecting.
++    if (rothko::recovery::bridge::PromptClearDeferred()) {
++      (void)FinishRecoveryChecked(ui, RecoveryFinishMode::kTailOnly);
++    } else {
++      FinishRecovery(ui);
++    }
+     switch (status) {
+       case INSTALL_SUCCESS:
+       case INSTALL_NONE:
+@@ -516,30 +582,61 @@ static Device::BuiltinAction PromptAndWait(Device* device, InstallResult status)
+     ui->SetProgressType(RecoveryUI::EMPTY);
+ 
+ change_menu:
++    rothko::recovery::bridge::EnsureTopMenuWindow(main_menu);
+     size_t chosen_item = ui->ShowMenu(
+         device->GetMenuHeaders(), device->GetMenuItems(), 0, false,
+         std::bind(&Device::HandleMenuKey, device, std::placeholders::_1, std::placeholders::_2));
+     // Handle Interrupt key
+     if (chosen_item == static_cast<size_t>(RecoveryUI::KeyError::INTERRUPTED)) {
++      switch (rothko::recovery::bridge::OnPromptInterrupt()) {
++        case rothko::recovery::bridge::PromptInterrupt::kNotOurs:
++          return Device::KEY_INTERRUPTED;
++        case rothko::recovery::bridge::PromptInterrupt::kReboot:
++          // Normal exit committed and verified on this thread. recovery_main()
++          // remains the only reboot path.
++          rothko::recovery::postcommit::Phase("prompt_return_reboot");
++          return Device::REBOOT;
++        case rothko::recovery::bridge::PromptInterrupt::kKeepMenu:
++          ui->ResetKeyInterruptStatus();
++          goto change_menu;
++        case rothko::recovery::bridge::PromptInterrupt::kErrorHold:
++          // Fail closed: never clear, never reboot; stay in the menu.
++          ui->ResetKeyInterruptStatus();
++          ui->Print("Normal-exit request rejected; recovery state held.\n");
++          goto change_menu;
++      }
+       return Device::KEY_INTERRUPTED;
+     }
+ 
+     if (chosen_item == Device::kGoBack || chosen_item == Device::kGoHome) {
+       device->GoHome();
++      main_menu = true;
+       goto change_menu;
+     }
+ 
++    // Any real selection leaves the top-menu window; a pending normal request is
++    // cancelled without cleanup.
++    rothko::recovery::bridge::LeaveTopMenuWindow();
++
+     // Device-specific code may take some action here. It may return one of the core actions
+     // handled in the switch statement below.
+-    Device::BuiltinAction chosen_action =
+-        (chosen_item == static_cast<size_t>(RecoveryUI::KeyError::TIMED_OUT))
+-            ? Device::REBOOT
+-            : device->InvokeMenuItem(chosen_item);
++    Device::BuiltinAction chosen_action;
++    if (chosen_item == static_cast<size_t>(RecoveryUI::KeyError::TIMED_OUT)) {
++      // A held or in-flight normal-exit session must not take the menu
++      // timeout/default reboot path.
++      chosen_action = rothko::recovery::bridge::DefaultRebootSuppressed() ? Device::NO_ACTION
++                                                                         : Device::REBOOT;
++    } else {
++      chosen_action = device->InvokeMenuItem(chosen_item);
++    }
+ 
+     switch (chosen_action) {
+       case Device::MENU_BASE:
++        main_menu = true;
++        goto change_menu;
+       case Device::MENU_WIPE:
+       case Device::MENU_ADVANCED:
++        main_menu = false;
+         goto change_menu;
+ 
+       case Device::REBOOT_FROM_FASTBOOT:    // Can not happen
+@@ -1064,6 +1161,7 @@ Device::BuiltinAction start_recovery(Device* device, const std::vector<std::stri
+   } else if (status != INSTALL_REBOOT) {
+     if (status == INSTALL_NONE || ui->IsTextVisible()) {
+       auto temp = PromptAndWait(device, status);
++      rothko::recovery::postcommit::Phase("prompt_and_wait.after");
+       if (temp != Device::NO_ACTION) {
+         next_action = temp;
+       }
+@@ -1071,13 +1169,24 @@ Device::BuiltinAction start_recovery(Device* device, const std::vector<std::stri
+   }
+ 
+   // Save logs and clean up before rebooting or shutting down.
++  rothko::recovery::postcommit::Phase("finish_recovery.before");
+   FinishRecovery(ui);
++  rothko::recovery::postcommit::Phase("finish_recovery.after");
+ 
++  rothko::recovery::postcommit::Phase("volmgr_unmount_all.before");
+   volmgr->unmountAll();
++  rothko::recovery::postcommit::Phase("volmgr_unmount_all.after");
++  rothko::recovery::postcommit::Phase("volmgr_stop.before");
+   volmgr->stop();
++  rothko::recovery::postcommit::Phase("volmgr_stop.after");
++  rothko::recovery::postcommit::Phase("delete_volclient.before");
+   delete volclient;
++  rothko::recovery::postcommit::Phase("delete_volclient.after");
+ 
++  rothko::recovery::postcommit::Phase("tail_sync.before");
+   sync();
++  rothko::recovery::postcommit::Phase("tail_sync.after");
+ 
++  rothko::recovery::postcommit::Phase("start_recovery_return");
+   return next_action;
+ }
+diff --git a/recovery.h b/recovery.h
+index 08bacbf0..22fc825c 100644
+--- a/recovery.h
++++ b/recovery.h
+@@ -21,6 +21,32 @@
+ 
+ #include "recovery_ui/device.h"
+ 
++class RecoveryUI;
++
++// Observable result of the real FinishRecovery tail. Before this refactor the
++// only signal was a log line; callers that must fail closed (the normal-exit
++// adapter) need the actual write/fsync/verify outcome, not an assumed success.
++struct RecoveryCleanupResult {
++  bool locale_saved = false;
++  bool logs_copied = false;
++  bool clear_attempted = false;
++  bool bcb_cleared = false;
++  bool command_removed = false;
++  bool synced = false;
++};
++
++// How much of the standard FinishRecovery cleanup to run.
++enum class RecoveryFinishMode {
++  kTailOnly,        // locale/log/sync only; the BCB and command file stay put
++  kTailAndCommand,  // tail plus the standard command-file unlink (BCB already verified empty)
++  kFull,            // tail, standard BCB clear and command-file unlink
++};
++
++// Runs the standard locale/log tail plus the requested BCB/command cleanup.
++// The result exposes every real outcome; failures are still logged exactly as
++// before and are never converted into an assumed success.
++RecoveryCleanupResult FinishRecoveryChecked(RecoveryUI* ui, RecoveryFinishMode mode);
++
+ Device::BuiltinAction start_recovery(Device* device, const std::vector<std::string>& args);
+ 
+ std::string get_build_type();
+diff --git a/recovery_enforcement.h b/recovery_enforcement.h
+new file mode 100644
+index 00000000..46b5fe09
+--- /dev/null
++++ b/recovery_enforcement.h
+@@ -0,0 +1,72 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++#pragma once
++#include <stddef.h>
++#include <fcntl.h>
++#include <sys/stat.h>
++#include <sys/statfs.h>
++#include <unistd.h>
++
++namespace rothko::recovery::enforcement {
++constexpr char kEnforce[] = "/sys/fs/selinux/enforce";
++constexpr unsigned long kSelinuxMagic = 0xf97cff8cUL;
++enum class Outcome { kAlreadyEnforcing, kTightenedVerified, kReadFailed,
++                     kInvalidMode, kWriteFailed, kReadbackFailed, kNotEnforcing };
++struct ReadResult { bool ok = false; int mode = -1; };
++struct Hooks {
++    ReadResult (*read)();
++    bool (*write_one)();
++};
++inline bool Accepted(Outcome outcome) {
++    return outcome == Outcome::kAlreadyEnforcing || outcome == Outcome::kTightenedVerified;
++}
++inline int ParseMode(const char* data, size_t size) {
++    if (!data || (size != 1 && size != 2)) return -1;
++    if (size == 2 && data[1] != '\n') return -1;
++    return data[0] == '0' ? 0 : data[0] == '1' ? 1 : -1;
++}
++// A transition may only strengthen. Never attempts a write when already1,
++// never writes0, never retries a failed/uncertain write, never promotes read errors.
++inline Outcome Tighten(const Hooks& hooks) {
++    if (!hooks.read || !hooks.write_one) return Outcome::kReadFailed;
++    const ReadResult initial = hooks.read();
++    if (!initial.ok) return Outcome::kReadFailed;
++    if (initial.mode == 1) return Outcome::kAlreadyEnforcing;
++    if (initial.mode != 0) return Outcome::kInvalidMode;
++    if (!hooks.write_one()) return Outcome::kWriteFailed;
++    const ReadResult after = hooks.read();
++    if (!after.ok) return Outcome::kReadbackFailed;
++    return after.mode == 1 ? Outcome::kTightenedVerified : Outcome::kNotEnforcing;
++}
++inline bool ReadOnlyRequired(const Hooks& hooks) {
++    if (!hooks.read) return false;
++    const ReadResult value = hooks.read();
++    return value.ok && value.mode == 1;
++}
++inline bool CorrectFilesystem(int fd) {
++    struct statfs fs {};
++    return fstatfs(fd, &fs) == 0 && static_cast<unsigned long>(fs.f_type) == kSelinuxMagic;
++}
++inline ReadResult ReadKernelMode() {
++    const int fd = open(kEnforce, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
++    if (fd < 0) return {};
++    if (!CorrectFilesystem(fd)) { close(fd); return {}; }
++    char data[4] = {};
++    const ssize_t got = read(fd, data, sizeof(data));
++    const bool closed = close(fd) == 0;
++    if (got <= 0 || !closed) return {};
++    const int mode = ParseMode(data, static_cast<size_t>(got));
++    return {mode >= 0, mode};
++}
++inline bool WriteKernelOne() {
++    const int fd = open(kEnforce, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
++    if (fd < 0) return false;
++    if (!CorrectFilesystem(fd)) { close(fd); return false; }
++    // Exactly one standard selinuxfs enforcement request. No general path/value API.
++    const ssize_t written = write(fd, "1", 1);
++    const bool closed = close(fd) == 0;
++    return written == 1 && closed;
++}
++inline Hooks KernelHooks() { return {ReadKernelMode, WriteKernelOne}; }
++inline Outcome TightenKernel() { return Tighten(KernelHooks()); }
++inline bool KernelIsEnforcing() { return ReadOnlyRequired(KernelHooks()); }
++}  // namespace rothko::recovery::enforcement
+diff --git a/recovery_launcher.cpp b/recovery_launcher.cpp
+new file mode 100644
+index 00000000..c6c16c52
+--- /dev/null
++++ b/recovery_launcher.cpp
+@@ -0,0 +1,226 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "recovery_launcher.h"
++#include "recovery_enforcement.h"
++
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/auxv.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++namespace rothko::recovery::launcher {
++
++namespace {
++
++bool IsApprovedSelfPath(const char* path) {
++  return strcmp(path, kSelfPathPrivate) == 0;
++}
++
++// A loader variable is any name starting with "LD_".  This covers the complete
++// Bionic loader namespace (LD_LIBRARY_PATH, LD_PRELOAD, LD_AUDIT, LD_DEBUG,
++// LD_CONFIG_FILE, LD_SHOW_AUXV, ...).  ANDROID_LD_* is not a Bionic loader
++// input and is not matched.
++bool IsLoaderVariable(const char* entry) {
++  return strncmp(entry, "LD_", 3) == 0;
++}
++
++constexpr size_t kExpectedContextLength = sizeof(kExpectedSelinuxContext) - 1;
++
++}  // namespace
++
++ExitCode ValidateInvocation(const HostFacts& facts, int argc, char** argv) {
++  // An absent auxv entry is getauxval()==0 with errno=ENOENT; it is not a
++  // valid zero.  A valid 0 or 1 is accepted for the static first stage; every
++  // other value is refused.  Both accepted values still go through the
++  // complete admission below.
++  if (!facts.auxv.valid) return kExitAtSecure;
++  if (facts.auxv.value != 0 && facts.auxv.value != 1) return kExitAtSecure;
++
++  // Root real and effective identity, and no real/effective gid split.
++  if (facts.uid != 0 || facts.euid != 0) return kExitIdentity;
++  if (facts.gid != facts.egid) return kExitIdentity;
++
++  // Exact domain is mandatory for both AT_SECURE values.  A missing, garbled
++  // or different context fails closed; the production reader never accepts a
++  // value from argv, environment, a property or a caller-supplied file.
++  if (facts.own_context.status != OwnContextStatus::kExact) return kExitContext;
++  if (strncmp(facts.own_context.value, kExpectedSelinuxContext, kExpectedContextLength) != 0 ||
++      facts.own_context.value[kExpectedContextLength] != '\0') {
++    return kExitContext;
++  }
++
++  // The launcher must be the approved file at the one fixed private path,
++  // root-owned, regular, not group/world writable and not set-id.  The build
++  // intermediate path is deliberately not accepted at runtime.
++  if (facts.self_exe == nullptr || !IsApprovedSelfPath(facts.self_exe)) return kExitIdentity;
++  if (!facts.self_stat_ok || !S_ISREG(facts.self_mode)) return kExitIdentity;
++  if (facts.self_uid != 0) return kExitIdentity;
++  if ((facts.self_mode & (S_IWGRP | S_IWOTH)) != 0) return kExitIdentity;
++  if ((facts.self_mode & (S_ISUID | S_ISGID)) != 0) return kExitIdentity;
++
++  if (argv == nullptr || argc < 1 || argc > kMaxProgramArgc) return kExitArguments;
++  for (int i = 0; i < argc; ++i) {
++    if (argv[i] == nullptr) return kExitArguments;
++  }
++  // No interpretation of argv[1:]: they are passed to Recovery unchanged and
++  // Recovery's own argument handling stays authoritative.
++  return kExitOk;
++}
++
++bool BuildChildEnvironment(const char* const* envp, EnvBuffer* out) {
++  if (out == nullptr) return false;
++  out->count = 0;
++  out->used = 0;
++  out->ptrs[0] = nullptr;
++
++  for (size_t i = 0; envp != nullptr && envp[i] != nullptr; ++i) {
++    const char* entry = envp[i];
++    if (IsLoaderVariable(entry)) continue;
++    if (strchr(entry, '=') == nullptr) continue;
++
++    const size_t len = strlen(entry);
++    if (out->count + 2 >= EnvBuffer::kMaxVars) return false;
++    if (out->used + len + 1 > EnvBuffer::kMaxBytes) return false;
++
++    memcpy(out->storage + out->used, entry, len + 1);
++    out->ptrs[out->count++] = out->storage + out->used;
++    out->used += len + 1;
++  }
++
++  static constexpr char kFixed[] = "LD_LIBRARY_PATH=/system/recovery-runtime/lib64";
++  constexpr size_t kFixedLen = sizeof(kFixed);  // includes NUL
++  if (out->used + kFixedLen > EnvBuffer::kMaxBytes) return false;
++
++  memcpy(out->storage + out->used, kFixed, kFixedLen);
++  out->ptrs[out->count++] = out->storage + out->used;
++  out->used += kFixedLen;
++  out->ptrs[out->count] = nullptr;
++  return true;
++}
++
++ExitCode Run(const HostFacts& facts, int argc, char** argv, ExecFn exec, EnvBuffer* env_out) {
++  if (exec == nullptr) return kExitUnexpected;
++
++  const ExitCode validation = ValidateInvocation(facts, argc, argv);
++  if (validation != kExitOk) return validation;
++#if !defined(ROTHKO_RECOVERY_LAUNCHER_CORE_ONLY)
++  // Only the device-specific static first hop may strengthen inherited OEM permissive.
++  // Root/exactdomain/trusted-file checks above must run BEFORE this fixed1-only request.
++  const auto enforcing = rothko::recovery::enforcement::TightenKernel();
++  if (!rothko::recovery::enforcement::Accepted(enforcing)) {
++    fprintf(stderr, "recovery-launcher: cannot establish Enforcing; outcome=%d\n",
++            static_cast<int>(enforcing));
++    return static_cast<ExitCode>(106);
++  }
++  fprintf(stderr, "recovery-launcher: Enforcing verified; outcome=%d\n",
++          static_cast<int>(enforcing));
++#endif
++
++  EnvBuffer local;
++  EnvBuffer* env = env_out != nullptr ? env_out : &local;
++  if (!BuildChildEnvironment(facts.envp, env)) return kExitEnvironment;
++
++  // argv for the child: private linker, then the exact Recovery program, then
++  // the original recovery arguments.  Bionic drops the linker-path argv[0]
++  // when the linker is invoked directly, so Recovery sees
++  // argv[0] = /system/bin/recovery and argv[1:] = original argv[1:].
++  char* child_argv[kMaxProgramArgc + 3] = {};
++  child_argv[0] = const_cast<char*>(kPrivateLinker);
++  child_argv[1] = const_cast<char*>(kRecoveryProgram);
++  for (int i = 1; i < argc; ++i) {
++    child_argv[i + 1] = argv[i];
++  }
++  child_argv[argc + 1] = nullptr;
++
++  const int result = exec(kPrivateLinker, child_argv, env->ptrs);
++  const int saved_errno = errno;
++  fprintf(stderr, "recovery-launcher: execve(%s) returned %d: %s\n", kPrivateLinker, result,
++          strerror(saved_errno));
++  return kExitExecFailed;
++}
++
++}  // namespace rothko::recovery::launcher
++
++#if !defined(ROTHKO_RECOVERY_LAUNCHER_CORE_ONLY)
++
++namespace {
++
++const char* RefusalReason(int code) {
++  switch (code) {
++    case rothko::recovery::launcher::kExitAtSecure:
++      return "AT_SECURE auxv is unavailable or not a valid 0/1";
++    case rothko::recovery::launcher::kExitIdentity:
++      return "unexpected uid/gid, launcher path or launcher file permissions";
++    case rothko::recovery::launcher::kExitContext:
++      return "SELinux context is not exactly u:r:recovery:s0";
++    case rothko::recovery::launcher::kExitArguments:
++      return "unexpected argument count or null argument";
++    case rothko::recovery::launcher::kExitEnvironment:
++      return "could not construct the sanitized environment";
++    case rothko::recovery::launcher::kExitExecFailed:
++      return "execve of the private linker failed";
++    default:
++      return "unexpected launcher state";
++  }
++}
++
++}  // namespace
++
++int main(int argc, char** argv) {
++  namespace rl = rothko::recovery::launcher;
++
++  rl::HostFacts facts{};
++  facts.auxv = rothko::recovery::transition::ReadAtSecureAuxv();
++  facts.uid = getuid();
++  facts.euid = geteuid();
++  facts.gid = getgid();
++  facts.egid = getegid();
++  facts.own_context = rl::ReadOwnSelinuxContext();
++  fprintf(stderr,
++          "recovery-launcher: entry auxv_valid=%d AT_SECURE=%lu uid=%u euid=%u gid=%u egid=%u context_status=%d sid=%s\n",
++          facts.auxv.valid, facts.auxv.value, facts.uid, facts.euid, facts.gid, facts.egid,
++          static_cast<int>(facts.own_context.status),
++          facts.own_context.status == rl::OwnContextStatus::kExact
++              ? facts.own_context.value : "(not-exact-or-unavailable)");
++
++  char self[4096] = {};
++  const ssize_t self_len = readlink("/proc/self/exe", self, sizeof(self) - 1);
++  if (self_len > 0 && static_cast<size_t>(self_len) < sizeof(self)) {
++    self[self_len] = '\0';
++    facts.self_exe = self;
++  }
++
++  struct stat self_stat {};
++  if (stat("/proc/self/exe", &self_stat) == 0) {
++    facts.self_stat_ok = true;
++    facts.self_mode = static_cast<unsigned>(self_stat.st_mode);
++    facts.self_uid = static_cast<unsigned>(self_stat.st_uid);
++  }
++
++  facts.envp = environ;
++
++  const int code = static_cast<int>(rl::Run(facts, argc, argv, execve, nullptr));
++  if (code != static_cast<int>(rl::kExitOk)) {
++    fprintf(stderr, "recovery-launcher: refused (exit %d): %s\n", code, RefusalReason(code));
++  }
++  return code;
++}
++
++#endif  // !ROTHKO_RECOVERY_LAUNCHER_CORE_ONLY
+diff --git a/recovery_launcher.h b/recovery_launcher.h
+new file mode 100644
+index 00000000..0ac0f367
+--- /dev/null
++++ b/recovery_launcher.h
+@@ -0,0 +1,153 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <stddef.h>
++
++#include "own_attr_context.h"
++#include "static_transition_facts.h"
++
++// Fixed-path static launcher for the private Recovery runtime.
++//
++// This launcher is selected only by the Recovery service command line.  It has
++// exactly one target: the private linker in the private runtime directory,
++// loading the Recovery program from its original, unmodified location
++// /system/bin/recovery.  No target path, program name or loader setting is
++// accepted from arguments, environment or any file.  Every refusal is a
++// non-zero exit with nothing executed (fail closed, no public fallback).
++//
++// Static first-stage transition (2026-11-08 policy evidence):
++// init -> recovery is allowed but noatsecure is DENIED, so init's explicit
++// seclabel entry can give this static launcher AT_SECURE=1.  The static
++// launcher therefore accepts a valid auxv AT_SECURE of 0 or 1, but BOTH values
++// must pass the same complete admission: ruid==euid==0, rgid==egid, exact
++// SELinux domain u:r:recovery:s0, the one fixed private self path,
++// root-owned regular file, no set-id and no group/world write.  It clears
++// every foreign LD_* and sets only the fixed private LD_LIBRARY_PATH, then
++// execve()s the private linker.
++//
++// An auxv entry that is absent (getauxval returns 0 with errno=ENOENT) is NOT
++// treated as a valid zero.  HostFacts.auxv defaults to invalid.
++//
++// This is NOT a relaxation of the dynamic Recovery guard: the private linker
++// re-computes secureexec for the next exec, and Recovery's earliest-main guard
++// still requires a valid AT_SECURE==0, ruid==euid==0, rgid==egid, the real
++// recovery SID, and an all-private DT_NEEDED set.  A static first stage
++// accepting 1 never means the dynamic Recovery may ignore LD_*.
++namespace rothko::recovery::launcher {
++
++// The private runtime paths are build/packaging constants.  They are fixed at
++// compile time and are never derived from argv or the environment.
++inline constexpr const char kPrivateLinker[] = "/system/recovery-runtime/bin/linker64";
++inline constexpr const char kRecoveryProgram[] = "/system/bin/recovery";
++inline constexpr const char kPrivateLibDir[] = "/system/recovery-runtime/lib64";
++inline constexpr const char kPrivateLibDirPrefix[] = "/system/recovery-runtime/lib64/";
++inline constexpr const char kLoaderPathVariable[] = "LD_LIBRARY_PATH";
++inline constexpr const char kFixedLoaderPathValue[] = "/system/recovery-runtime/lib64";
++
++// The one approved production path of this launcher itself.  Main builds a
++// normal cc_binary intermediate (which may sit at OUT/.../system/bin) and its
++// authorized vendor_boot packer places the artifact here.  The intermediate
++// build path is never executed and this launcher does not accept it as a
++// runtime identity.  No other path is accepted.
++inline constexpr const char kSelfPathPrivate[] = "/system/recovery-runtime/bin/recovery-launcher";
++
++// Exact SELinux context required for the static first stage.  The kernel
++// normally appends a NUL (some kernels a newline); no other trailing bytes,
++// whitespace, category suffix or extra SID is accepted.
++inline constexpr const char kExpectedSelinuxContext[] = "u:r:recovery:s0";
++inline constexpr size_t kMaxContextBytes = own_attr::kMaxBytes;
++
++// Shared own-attr types/helpers (also used by the earliest-main guard).
++using OwnContextStatus = own_attr::Status;
++using OwnContext = own_attr::Context;
++
++inline OwnContext ParseOwnContextBytes(const char* raw, size_t length) {
++  return own_attr::Parse(raw, length);
++}
++
++inline OwnContext ReadOwnSelinuxContext() {
++  return own_attr::Read();
++}
++
++// Every non-zero value means: nothing executed, process refused.
++enum ExitCode : int {
++  kExitOk = 0,
++  kExitExecFailed = 100,
++  kExitAtSecure = 101,
++  kExitIdentity = 102,
++  kExitArguments = 103,
++  kExitEnvironment = 104,
++  kExitContext = 105,
++  kExitUnexpected = 111,
++};
++
++// Largest accepted original argv (including argv[0]).  The forwarded child
++// argv is argc + 1 entries (private linker, program, original argv[1:]).
++inline constexpr int kMaxProgramArgc = 61;
++
++// Facts gathered by the real main() and injected by host tests.  All pointers
++// are borrowed; nothing is owned.  Defaults are fail-closed: invalid auxv,
++// non-root ids and an unreadable context.
++struct HostFacts {
++  transition::AuxvFacts auxv;     // defaults invalid (auxv_valid == false)
++  unsigned uid = 1;               // getuid()
++  unsigned euid = 1;              // geteuid()
++  unsigned gid = 1;               // getgid()
++  unsigned egid = 1;              // getegid()
++  const char* self_exe = nullptr; // readlink("/proc/self/exe"); nullptr on failure
++  bool self_stat_ok = false;      // stat("/proc/self/exe") succeeded
++  unsigned self_mode = 0;         // st_mode of the launcher file
++  unsigned self_uid = 0;          // st_uid of the launcher file
++  const char* const* envp = nullptr; // environ
++  OwnContext own_context;         // exact u:r:recovery:s0 required
++};
++
++// The exec sink.  Production uses execve(2); tests use a recorder.  The
++// launcher never falls back to execvp/execl/shell.
++using ExecFn = int (*)(const char* path, char* const argv[], char* const envp[]);
++
++// Owning storage for the child environment.  Fixed size; exceeding a limit is
++// a refusal, not silent truncation.
++struct EnvBuffer {
++  static constexpr size_t kMaxVars = 256;
++  static constexpr size_t kMaxBytes = 16384;
++
++  char storage[kMaxBytes] = {};
++  char* ptrs[kMaxVars + 2] = {};
++  size_t count = 0;
++  size_t used = 0;
++};
++
++// Pure policy check: valid auxv AT_SECURE 0/1, root real+effective uid, equal
++// real+effective gid, exact domain, approved launcher path, file permissions
++// and argument shape.  It deliberately does NOT inspect or reinterpret
++// recovery arguments; the original recovery parser stays authoritative.
++ExitCode ValidateInvocation(const HostFacts& facts, int argc, char** argv);
++
++// Builds the child environment from `envp`: every variable whose name begins
++// with "LD_" is dropped (LD_PRELOAD, LD_AUDIT, LD_DEBUG, LD_CONFIG_FILE,
++// LD_LIBRARY_PATH, LD_SHOW_AUXV, ...), every other variable is preserved
++// byte-for-byte (this keeps ANDROID_SOCKET_* and ANDROID_ROOT intact), and
++// exactly one fixed LD_LIBRARY_PATH is appended.
++bool BuildChildEnvironment(const char* const* envp, EnvBuffer* out);
++
++// Validates, builds the environment and calls `exec`.  Returns kExitExecFailed
++// if `exec` returns (production execve must not return on success).
++ExitCode Run(const HostFacts& facts, int argc, char** argv, ExecFn exec, EnvBuffer* env_out);
++
++}  // namespace rothko::recovery::launcher
+diff --git a/recovery_loader_guard.cpp b/recovery_loader_guard.cpp
+new file mode 100644
+index 00000000..f98007e0
+--- /dev/null
++++ b/recovery_loader_guard.cpp
+@@ -0,0 +1,279 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "recovery_loader_guard.h"
++#include "recovery_enforcement.h"
++
++#include <stdio.h>
++#include <string.h>
++#include <dlfcn.h>
++#include <link.h>
++#include <unistd.h>
++
++extern char** environ;
++
++namespace rothko::recovery::loader_guard {
++
++namespace {
++
++constexpr size_t kMaxObjectNames = 256;
++constexpr size_t kSelfPathMax = 4096;
++constexpr size_t kExpectedContextLength = sizeof(own_attr::kRecoveryContext) - 1;
++
++void SetError(char* error, size_t error_size, const char* format, const char* value) {
++  if (error == nullptr || error_size == 0) return;
++  snprintf(error, error_size, format, value != nullptr ? value : "(null)");
++}
++
++// A private library name must be exactly one path segment under the private
++// lib64 directory and look like a shared object.  No subdirectories, no ".",
++// no "..", no public absolute path.
++bool IsPrivateLibraryName(const char* name) {
++  constexpr size_t kPrefixLen = sizeof(kPrivateLibDirPrefix) - 1;
++  if (strncmp(name, kPrivateLibDirPrefix, kPrefixLen) != 0) return false;
++
++  const char* base = name + kPrefixLen;
++  if (base[0] == '\0') return false;
++  if (strchr(base, '/') != nullptr) return false;
++  if (strcmp(base, ".") == 0 || strcmp(base, "..") == 0) return false;
++
++  const size_t len = strlen(base);
++  if (len > 3 && strcmp(base + len - 3, ".so") == 0) return true;
++  return strstr(base, ".so.") != nullptr;
++}
++
++bool IsApprovedObjectName(const char* name, bool* saw_program, bool* saw_private_lib) {
++  if (name == nullptr || name[0] == '\0') return false;
++  if (strcmp(name, kRecoveryProgram) == 0) {
++    *saw_program = true;
++    return true;
++  }
++  if (strcmp(name, kPrivateLinker) == 0) return true;
++  if (strcmp(name, kLinkerInterpName) == 0) return true;
++  if (strcmp(name, kVdsoName) == 0) return true;
++  if (IsPrivateLibraryName(name)) {
++    *saw_private_lib = true;
++    return true;
++  }
++  return false;
++}
++
++struct CollectContext {
++  const char* names[kMaxObjectNames];
++  size_t count;
++  bool overflow;
++};
++
++int CollectObjectName(struct dl_phdr_info* info, size_t /*size*/, void* data) {
++  auto* context = static_cast<CollectContext*>(data);
++  if (context->count >= kMaxObjectNames) {
++    context->overflow = true;
++    return 1;
++  }
++  context->names[context->count++] = info->dlpi_name;
++  return 0;
++}
++
++}  // namespace
++
++GuardStatus EvaluateGuardFacts(const GuardFacts& facts) {
++  // An absent auxv entry is getauxval()==0 with errno=ENOENT; it is not a
++  // valid zero.  The dynamic Recovery requires a real AT_SECURE==0.
++  if (!facts.auxv.valid) return GuardStatus::kAuxvUnavailable;
++  if (facts.auxv.value != 0) return GuardStatus::kAtSecureNonZero;
++
++  if (facts.uid != 0 || facts.euid != 0) return GuardStatus::kIdentity;
++  if (facts.gid != facts.egid) return GuardStatus::kIdentity;
++
++  if (facts.own_context.status != own_attr::Status::kExact) return GuardStatus::kContext;
++  if (strncmp(facts.own_context.value, own_attr::kRecoveryContext,
++              kExpectedContextLength) != 0 ||
++      facts.own_context.value[kExpectedContextLength] != '\0') {
++    return GuardStatus::kContext;
++  }
++  return GuardStatus::kOk;
++}
++
++const char* GuardStatusName(GuardStatus status) {
++  switch (status) {
++    case GuardStatus::kOk:
++      return "ok";
++    case GuardStatus::kAuxvUnavailable:
++      return "AT_SECURE auxv is unavailable (0+ENOENT is not a valid zero)";
++    case GuardStatus::kAtSecureNonZero:
++      return "AT_SECURE is not a valid zero for the dynamic Recovery";
++    case GuardStatus::kIdentity:
++      return "uid/gid is not ruid==euid==0 with rgid==egid";
++    case GuardStatus::kContext:
++      return "SELinux context is not exactly u:r:recovery:s0";
++  }
++  return "unknown guard status";
++}
++
++void SanitizeEnvironment() {
++  for (char** entry = environ; entry != nullptr && *entry != nullptr;) {
++    if (strncmp(*entry, "LD_", 3) != 0) {
++      ++entry;
++      continue;
++    }
++    // Shift the remaining pointers left and re-examine this slot.
++    char** cursor = entry;
++    while (*(cursor + 1) != nullptr) {
++      *cursor = *(cursor + 1);
++      ++cursor;
++    }
++    *cursor = nullptr;
++  }
++}
++
++bool EnvironmentIsSanitized() {
++  for (char** entry = environ; entry != nullptr && *entry != nullptr; ++entry) {
++    if (strncmp(*entry, "LD_", 3) == 0) return false;
++  }
++  return true;
++}
++
++bool AuditObjectNames(const char* const* names, size_t count, char* error, size_t error_size) {
++  if (error != nullptr && error_size > 0) error[0] = '\0';
++  if (names == nullptr || count == 0) {
++    SetError(error, error_size, "no loaded objects reported: %s", nullptr);
++    return false;
++  }
++
++  bool saw_program = false;
++  bool saw_private_lib = false;
++  for (size_t i = 0; i < count; ++i) {
++    if (!IsApprovedObjectName(names[i], &saw_program, &saw_private_lib)) {
++      char index[32] = {};
++      snprintf(index, sizeof(index), "object[%zu]", i);
++      if (error != nullptr && error_size > 0) {
++        snprintf(error, error_size, "%s not approved: %s", index,
++                 names[i] != nullptr ? names[i] : "(null)");
++      }
++      return false;
++    }
++  }
++
++  if (!saw_program) {
++    SetError(error, error_size, "expected Recovery program %s was not loaded", kRecoveryProgram);
++    return false;
++  }
++  if (!saw_private_lib) {
++    SetError(error, error_size, "no private library under %s was loaded", kPrivateLibDirPrefix);
++    return false;
++  }
++  return true;
++}
++
++const char* UiExtensionOpenPath(bool private_runtime_enabled, const char* non_private_default) {
++  if (private_runtime_enabled) return kUiExtensionPath;
++  return non_private_default != nullptr ? non_private_default : kUiExtensionBareSoname;
++}
++
++bool IsApprovedUiExtensionPath(const char* path) {
++  return path != nullptr && strcmp(path, kUiExtensionPath) == 0;
++}
++
++bool SanitizeAndAuditEarly() {
++  if (!rothko::recovery::enforcement::KernelIsEnforcing()) {
++    fprintf(stderr, "recovery-loader-guard: require actual Enforcing; refuse\n");
++    return false;
++  }
++  GuardFacts facts;
++  facts.auxv = transition::ReadAtSecureAuxv();
++  facts.uid = getuid();
++  facts.euid = geteuid();
++  facts.gid = getgid();
++  facts.egid = getegid();
++  facts.own_context = own_attr::Read();
++  fprintf(stderr,
++          "recovery-loader-guard: entry auxv_valid=%d AT_SECURE=%lu uid=%u euid=%u gid=%u egid=%u context_status=%d sid=%s\n",
++          facts.auxv.valid, facts.auxv.value, facts.uid, facts.euid, facts.gid, facts.egid,
++          static_cast<int>(facts.own_context.status),
++          facts.own_context.status == own_attr::Status::kExact
++              ? facts.own_context.value : "(not-exact-or-unavailable)");
++
++  const GuardStatus status = EvaluateGuardFacts(facts);
++  if (status != GuardStatus::kOk) {
++    fprintf(stderr, "recovery-loader-guard: %s; refusing to continue\n",
++            GuardStatusName(status));
++    return false;
++  }
++
++  SanitizeEnvironment();
++  if (!EnvironmentIsSanitized()) {
++    fprintf(stderr, "recovery-loader-guard: LD_* variable survived sanitization\n");
++    return false;
++  }
++
++  char self[kSelfPathMax] = {};
++  const ssize_t self_len = readlink("/proc/self/exe", self, sizeof(self) - 1);
++  if (self_len <= 0 || static_cast<size_t>(self_len) >= sizeof(self)) {
++    fprintf(stderr, "recovery-loader-guard: cannot read /proc/self/exe\n");
++    return false;
++  }
++  self[self_len] = '\0';
++  if (strcmp(self, kPrivateLinker) != 0) {
++    fprintf(stderr, "recovery-loader-guard: process was not started by %s (got %s)\n",
++            kPrivateLinker, self);
++    return false;
++  }
++
++  CollectContext context{};
++  if (dl_iterate_phdr(CollectObjectName, &context) != 0 || context.overflow) {
++    fprintf(stderr, "recovery-loader-guard: loaded-object enumeration failed\n");
++    return false;
++  }
++
++  for (size_t i = 0; i < context.count; ++i) {
++    fprintf(stderr, "recovery-loader-guard: loaded[%zu]=%s\n", i,
++            context.names[i] != nullptr ? context.names[i] : "(null)");
++  }
++
++  char error[512] = {};
++  if (!AuditObjectNames(context.names, context.count, error, sizeof(error))) {
++    fprintf(stderr, "recovery-loader-guard: %s\n", error);
++    return false;
++  }
++  return true;
++}
++
++bool VerifyUiExtensionProvider(void* handle, char* error, size_t error_size) {
++  if (error != nullptr && error_size > 0) error[0] = '\0';
++  // dlopen failure is the standard builtin make_device() fallback and is
++  // allowed.  A successful dlopen, however, must be the private build.
++  if (handle == nullptr) return true;
++
++  void* symbol = dlsym(handle, "make_device");
++  if (symbol == nullptr) {
++    SetError(error, error_size, "UI extension has no make_device: %s", dlerror());
++    return false;
++  }
++
++  Dl_info info{};
++  if (dladdr(symbol, &info) == 0 || info.dli_fname == nullptr) {
++    SetError(error, error_size, "cannot resolve UI extension provider path: %s", nullptr);
++    return false;
++  }
++  if (!IsApprovedUiExtensionPath(info.dli_fname)) {
++    SetError(error, error_size, "UI extension resolved outside the private runtime: %s",
++             info.dli_fname);
++    return false;
++  }
++  return true;
++}
++
++}  // namespace rothko::recovery::loader_guard
+diff --git a/recovery_loader_guard.h b/recovery_loader_guard.h
+new file mode 100644
+index 00000000..cd46aa70
+--- /dev/null
++++ b/recovery_loader_guard.h
+@@ -0,0 +1,124 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <stddef.h>
++
++#include "own_attr_context.h"
++#include "static_transition_facts.h"
++
++// Earliest-Recovery-main guard for the private runtime.
++//
++// Called as the FIRST statement of Recovery's main(), before logging,
++// properties, BCB access or any helper process.  It now checks, in order:
++//   1. a VALID auxv AT_SECURE == 0 (an absent auxv entry is 0 + ENOENT and is
++//      NOT a valid zero), and refuses any other value;
++//   2. ruid == euid == 0 and rgid == egid (no real/effective split);
++//   3. the real process SELinux context is exactly u:r:recovery:s0;
++//   4. removes every LD_* variable from the process environment;
++//   5. proves this process was started by the fixed private linker via
++//      /proc/self/exe;
++//   6. audits every already-loaded ELF object reported by dl_iterate_phdr and
++//      fails closed on any public/unknown/relative object.
++//
++// AT_SECURE == 0 alone never proves the recovery domain; the real SID read is
++// mandatory.  This does not relax any existing private-provider requirement.
++//
++// Boundary (must not be overstated): constructors of already-loaded objects
++// have already run before main(), and objects dlopen()ed later are not seen
++// here.  The guard can only refuse to continue; main must additionally check
++// the late UI-extension provider with VerifyUiExtensionProvider().
++namespace rothko::recovery::loader_guard {
++
++inline constexpr const char kPrivateLinker[] = "/system/recovery-runtime/bin/linker64";
++inline constexpr const char kRecoveryProgram[] = "/system/bin/recovery";
++// Bionic reports the running linker's dlpi_name from the Recovery ELF's
++// PT_INTERP string, which is the public path even when the kernel actually
++// executed the private linker.  The actual loader file is proven separately by
++// /proc/self/exe; this name is therefore a fixed, documented exception.
++inline constexpr const char kLinkerInterpName[] = "/system/bin/linker64";
++inline constexpr const char kPrivateLibDirPrefix[] = "/system/recovery-runtime/lib64/";
++inline constexpr const char kVdsoName[] = "[vdso]";
++
++// Bare soname used by non-private (default) device builds.  It must NEVER be
++// attempted on a private-runtime device: a bare name can resolve the public
++// OEM SDK34 C++ DSO and run its constructor before any post-dlopen check.
++inline constexpr const char kUiExtensionBareSoname[] = "librecovery_ui_ext.so";
++inline constexpr const char kUiExtensionPath[] = "/system/recovery-runtime/lib64/librecovery_ui_ext.so";
++
++// Returns the exact dlopen() argument the caller must use.
++//   private_runtime_enabled == true  -> always kUiExtensionPath (absolute),
++//                                       regardless of the non-private default.
++//   private_runtime_enabled == false -> the caller's original bare soname,
++//                                       preserving the pre-existing behaviour
++//                                       of devices that did not opt in.
++// The private-runtime device must pass true.  There is no runtime attempt-bare-
++// then-fallback sequence: the choice is made by main's unified device gate.
++const char* UiExtensionOpenPath(bool private_runtime_enabled, const char* non_private_default);
++
++// Facts used by the dynamic guard admission.  Defaults are fail-closed:
++// invalid auxv, non-root ids, unreadable context.
++struct GuardFacts {
++  transition::AuxvFacts auxv;
++  unsigned uid = 1;
++  unsigned euid = 1;
++  unsigned gid = 1;
++  unsigned egid = 1;
++  own_attr::Context own_context;
++};
++
++enum class GuardStatus : int {
++  kOk = 0,
++  kAuxvUnavailable,
++  kAtSecureNonZero,
++  kIdentity,
++  kContext,
++};
++
++// Pure facts evaluation; host tests inject facts.  Production fills the same
++// facts from getauxval/getuid/geteuid/getgid/getegid and the bounded own-attr
++// read, never from argv/environment/properties.
++GuardStatus EvaluateGuardFacts(const GuardFacts& facts);
++const char* GuardStatusName(GuardStatus status);
++
++// Removes every "LD_*" entry from environ in place, preserving every other
++// variable (notably ANDROID_SOCKET_* and ANDROID_ROOT).
++void SanitizeEnvironment();
++
++// True when no environ entry starts with "LD_".
++bool EnvironmentIsSanitized();
++
++// Pure audit over the object-name list reported by dl_iterate_phdr.  Returns
++// false (and fills `error`) on the first forbidden name, when the Recovery
++// program is absent, or when no private library was loaded.
++bool AuditObjectNames(const char* const* names, size_t count, char* error, size_t error_size);
++
++// Exact-path check for the only approved UI extension candidate.
++bool IsApprovedUiExtensionPath(const char* path);
++
++// Production entry.  Evaluates the real facts, prints a line per loaded object
++// for the boot log/evidence, and returns false on any failure; the caller must
++// fail closed and must not run the normal Recovery flow.
++bool SanitizeAndAuditEarly();
++
++// To be called immediately after the existing
++// dlopen("librecovery_ui_ext.so", RTLD_NOW) in recovery_main.cpp.
++// handle == nullptr (builtin fallback) is allowed.  A non-null handle is only
++// allowed when make_device actually resolves inside the exact private path.
++bool VerifyUiExtensionProvider(void* handle, char* error, size_t error_size);
++
++}  // namespace rothko::recovery::loader_guard
+diff --git a/recovery_main.cpp b/recovery_main.cpp
+index 3fdef4ea..1402271c 100644
+--- a/recovery_main.cpp
++++ b/recovery_main.cpp
+@@ -56,6 +56,11 @@
+ #include "otautil/paths.h"
+ #include "otautil/sysutil.h"
+ #include "recovery.h"
++#include "otautil/normal_exit_phase.h"
++#include "recovery_normal_exit_bridge.h"
++#if defined(ROTHKO_PRIVATE_RECOVERY_RUNTIME) && ROTHKO_PRIVATE_RECOVERY_RUNTIME
++#include "recovery_loader_guard.h"
++#endif
+ #include "recovery_ui/device.h"
+ #include "recovery_ui/stub_ui.h"
+ #include "recovery_ui/ui.h"
+@@ -351,6 +356,11 @@ static void redirect_stdio(const char* filename) {
+ }
+ 
+ int main(int argc, char** argv) {
++#if defined(ROTHKO_PRIVATE_RECOVERY_RUNTIME) && ROTHKO_PRIVATE_RECOVERY_RUNTIME
++  if (!rothko::recovery::loader_guard::SanitizeAndAuditEarly()) {
++    _exit(120);
++  }
++#endif
+   // We don't have logcat yet under recovery; so we'll print error on screen and log to stdout
+   // (which is redirected to recovery.log) as we used to do.
+   android::base::InitLogging(argv, &UiLogger);
+@@ -377,6 +387,10 @@ int main(int argc, char** argv) {
+   load_volume_table();
+ 
+   std::string stage;
++  if (!rothko::recovery::bridge::SecurityReadyForOperation()) _exit(123);
++  // Capture argv / full BCB / stage / command-file state before get_args() can
++  // rewrite the BCB. A non-clean or unreadable capture is permanently blocked.
++  rothko::recovery::bridge::CaptureBeforeGetArgs(argc, argv, &stage);
+   std::vector<std::string> args = get_args(argc, argv, &stage);
+   auto args_to_parse = StringVectorToNullTerminatedArray(args);
+ 
+@@ -435,11 +449,24 @@ int main(int argc, char** argv) {
+     }
+   }
+ 
++#if defined(ROTHKO_PRIVATE_RECOVERY_RUNTIME) && ROTHKO_PRIVATE_RECOVERY_RUNTIME
++  static constexpr const char* kDefaultLibRecoveryUIExt =
++      rothko::recovery::loader_guard::kUiExtensionPath;
++#else
+   static constexpr const char* kDefaultLibRecoveryUIExt = "librecovery_ui_ext.so";
++#endif
+   // Intentionally not calling dlclose(3) to avoid potential gotchas (e.g. `make_device` may have
+   // handed out pointers to code or static [or thread-local] data and doesn't collect them all back
+   // in on dlclose).
+   void* librecovery_ui_ext = dlopen(kDefaultLibRecoveryUIExt, RTLD_NOW);
++#if defined(ROTHKO_PRIVATE_RECOVERY_RUNTIME) && ROTHKO_PRIVATE_RECOVERY_RUNTIME
++  char ui_guard_error[512] = {};
++  if (!rothko::recovery::loader_guard::VerifyUiExtensionProvider(
++          librecovery_ui_ext, ui_guard_error, sizeof(ui_guard_error))) {
++    fprintf(stderr, "recovery-loader-guard: %s\n", ui_guard_error);
++    _exit(121);
++  }
++#endif
+ 
+   using MakeDeviceType = decltype(&make_device);
+   MakeDeviceType make_device_func = nullptr;
+@@ -475,6 +502,11 @@ int main(int argc, char** argv) {
+   device->SetBootState(&boot_state);
+   ui = device->GetUI();
+ 
++  // Arm the default-off normal-exit adapter (socket + coordinator). If the
++  // feature is disabled or the init socket is absent this is a no-op and the
++  // recovery flow below is unchanged.
++  rothko::recovery::bridge::Start(ui);
++
+   if (!HasCache()) {
+     device->RemoveMenuItemForAction(Device::WIPE_CACHE);
+   }
+@@ -534,6 +566,10 @@ int main(int argc, char** argv) {
+ 
+   Device::BuiltinAction next_recovery_action = Device::NO_ACTION;
+   while (true) {
++    if (!rothko::recovery::bridge::SecurityReadyForOperation()) {
++      pause();
++      continue;
++    }
+     // We start adbd in recovery for the device with userdebug build or a unlocked bootloader.
+     std::string usb_config =
+         fastboot ? "fastboot" : IsRoDebuggable() || IsDeviceUnlocked() ? "adb" : "none";
+@@ -565,6 +601,7 @@ int main(int argc, char** argv) {
+       }
+     }
+ 
++    rothko::recovery::postcommit::Phase("recovery_main.dispatch_enter");
+     // Reset the next recovery action.
+     next_recovery_action = Device::NO_ACTION;
+ 
+@@ -574,6 +611,12 @@ int main(int argc, char** argv) {
+         continue;
+       }
+     }
++    rothko::recovery::postcommit::Phase("dispatch_security.before");
++    if (!rothko::recovery::bridge::SecurityReadyForOperation()) {
++      rothko::recovery::postcommit::Phase("dispatch_security.hold");
++      continue;
++    }
++    rothko::recovery::postcommit::Phase("dispatch_security.after");
+     switch (ret) {
+       case Device::SHUTDOWN:
+         ui->Print("Shutting down...\n");
+@@ -634,7 +677,10 @@ int main(int argc, char** argv) {
+         break;
+ 
+       case Device::REBOOT:
++        rothko::recovery::postcommit::Phase("reboot_ui_print.before");
+         ui->Print("Rebooting...\n");
++        rothko::recovery::postcommit::Phase("reboot_ui_print.after");
++        rothko::recovery::postcommit::Phase("standard_reboot.before");
+         Reboot("userrequested,recovery");
+         break;
+ 
+diff --git a/recovery_normal_exit_bridge.cpp b/recovery_normal_exit_bridge.cpp
+new file mode 100644
+index 00000000..cf5e4cb5
+--- /dev/null
++++ b/recovery_normal_exit_bridge.cpp
+@@ -0,0 +1,731 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "otautil/normal_exit_phase.h"
++#include "recovery_normal_exit_bridge.h"
++#include "recovery_enforcement.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <string_view>
++#include <thread>
++#include <utility>
++#include <vector>
++
++#include <android-base/file.h>
++#include <android-base/logging.h>
++#include <android-base/properties.h>
++#include <android-base/strings.h>
++#include <bootloader_message/bootloader_message.h>
++#include <cutils/sockets.h>
++
++#include "normal_exit/get_args_canonical.h"
++#include "normal_exit/normal_exit.h"
++#include "normal_exit/normal_exit_posix.h"
++#include "recovery.h"
++#include "recovery_ui/ui.h"
++#include "recovery_utils/roots.h"
++
++namespace rothko::recovery::bridge {
++namespace {
++
++// Deployment-owned names. The socket is init-provided (see OWNERS-HANDOFF.md);
++// this adapter never creates /dev/socket entries or SELinux policy.
++constexpr const char* kSocketName = "rothko_recovery_normal";
++constexpr const char* kCommandFile = "/cache/recovery/command";
++constexpr const char* kFeatureProperty = "ro.rothko.recovery.normal_exit";
++constexpr const char* kBuildIdProperty = "ro.rothko.recovery.runtime_build_id";
++// This is the actual runtime comparison value, also retained for hash-bound
++// pack admission; do not replace it with an unrelated sidecar marker.
++[[gnu::used, gnu::retain]] const char kExpectedBuildId[] = "rothko-recovery-sdk36-20261108-r2-phase";
++constexpr const char* kBootIdPath = "/proc/sys/kernel/random/boot_id";
++constexpr std::size_t kMaxIdentityBanner = 128;
++constexpr int kFrameTimeoutMs = 2000;
++constexpr int kReplyTimeoutMs = 2000;
++constexpr int kPollSliceMs = 100;
++constexpr int kPendingDeadlineMs = 15000;
++
++// Compiled in by default and inert at runtime: the rothko-only property is the
++// opt-in. Define ROTHKO_RECOVERY_NORMAL_EXIT=0 for the recovery target to remove
++// the adapter from the build entirely (optional kill switch).
++#if defined(ROTHKO_RECOVERY_NORMAL_EXIT) && ROTHKO_RECOVERY_NORMAL_EXIT == 0
++constexpr bool kCompiledIn = false;
++#else
++constexpr bool kCompiledIn = true;
++#endif
++
++// ---------------------------------------------------------------------------
++// Capture helpers. Only fixed outcome classes are logged; BCB payloads and
++// command-file contents are never printed.
++// ---------------------------------------------------------------------------
++
++template <std::size_t N>
++bool AllZero(const char (&data)[N]) {
++  for (std::size_t i = 0; i < N; ++i) {
++    if (data[i] != '\0') return false;
++  }
++  return true;
++}
++
++template <std::size_t N>
++bool FieldToString(const char (&data)[N], std::string* out) {
++  const void* nul = memchr(data, '\0', N);
++  if (nul == nullptr) return false;  // unterminated => unknown => block
++  out->assign(data, static_cast<const char*>(nul) - data);
++  return true;
++}
++
++bool ReadBcb(Capture* capture) {
++  bootloader_message boot = {};
++  std::string err;
++  if (!read_bootloader_message(&boot, &err)) {
++    LOG(ERROR) << "rothko-normal-exit: BCB read failed: " << err;
++    capture->bcb_status = ReadStatus::kError;
++    capture->bcb = {};
++    capture->stage_status = ReadStatus::kError;
++    capture->stage.reset();
++    return false;
++  }
++  capture->bcb_status = ReadStatus::kOk;
++  if (!FieldToString(boot.command, &capture->bcb.command) ||
++      !FieldToString(boot.status, &capture->bcb.status) ||
++      !FieldToString(boot.recovery, &capture->bcb.recovery) ||
++      !FieldToString(boot.stage, &capture->bcb.stage)) {
++    LOG(ERROR) << "rothko-normal-exit: BCB field unterminated";
++    capture->bcb_status = ReadStatus::kError;
++    return false;
++  }
++  capture->bcb.reserved_zero = AllZero(boot.reserved);
++  capture->stage_status = ReadStatus::kOk;
++  capture->stage = capture->bcb.stage;
++  return true;
++}
++
++CommandFile CommandFileStatus() {
++  if (!HasCache()) return CommandFile::kAbsent;
++  if (ensure_path_mounted(kCommandFile) != 0) return CommandFile::kError;
++  if (access(kCommandFile, F_OK) == 0) return CommandFile::kPresent;
++  return errno == ENOENT ? CommandFile::kAbsent : CommandFile::kError;
++}
++
++// get_args() rewrites a boot-recovery BCB into "recovery\n<options>". The raw
++// pre-get_args capture is validated first; only then is the known rewrite
++// applied so the commit-time fresh read can match the same key.
++void ApplyGetArgsRewrite(Capture* capture, const std::vector<std::string>& argv) {
++  if (capture->bcb_status != ReadStatus::kOk) return;
++  if (capture->bcb.command != "boot-recovery") return;
++  std::string canonical;
++  if (!CanonicalizeBootRecovery(argv, capture->bcb.recovery, &canonical)) {
++    // Not the canonical form: keep the raw field so the core blocks it.
++    return;
++  }
++  capture->bcb.recovery = std::move(canonical);
++}
++
++Capture BuildFreshCapture(const std::vector<std::string>& argv) {
++  Capture capture;
++  // The key this fresh read is compared against was captured before get_args();
++  // the flag records that provenance rather than the read time.
++  capture.captured_before_get_args = true;
++  capture.argv_status = ReadStatus::kOk;  // argv is immutable after exec
++  capture.argv = argv;
++  (void)ReadBcb(&capture);
++  capture.commandfile = CommandFileStatus();
++  // Production recovery has no independent reason source besides argv/BCB, so
++  // an independent reason is absent; --reason=... therefore blocks admission.
++  capture.reason_status = ReadStatus::kOk;
++  return capture;
++}
++
++struct InitialCapture {
++  std::mutex mu;
++  bool valid = false;
++  bool raw_clean = false;
++  Capture capture;
++  std::vector<std::string> argv;
++};
++
++InitialCapture& Initial() {
++  static InitialCapture initial;
++  return initial;
++}
++
++// ---------------------------------------------------------------------------
++// Runtime state
++// ---------------------------------------------------------------------------
++
++struct ActiveConnection {
++  int fd = -1;
++  std::mutex mu;
++  std::condition_variable cv;
++  std::string reply_line;
++  bool reply_pending = false;
++  bool reply_done = false;
++  bool reply_ok = false;
++  bool release = false;
++  bool closed = false;
++};
++
++std::mutex g_state_mu;
++std::unique_ptr<Coordinator> g_coord;
++RecoveryUI* g_ui = nullptr;
++std::vector<std::string> g_argv;
++int g_listen_fd = -1;
++bool g_listening = false;
++
++std::thread g_worker;
++std::atomic<bool> g_stopping{false};
++int g_stop_pipe[2] = {-1, -1};
++
++std::mutex g_active_mu;
++std::shared_ptr<ActiveConnection> g_active;
++
++std::atomic<bool> g_verified_clear{false};
++std::atomic<bool> g_security_hold{false};
++
++Coordinator* Coord() {
++  std::lock_guard<std::mutex> lock(g_state_mu);
++  return g_coord.get();
++}
++
++std::shared_ptr<ActiveConnection> GrabActive() {
++  std::lock_guard<std::mutex> lock(g_active_mu);
++  return g_active;
++}
++
++void ReleaseActive() {
++  std::shared_ptr<ActiveConnection> conn;
++  {
++    std::lock_guard<std::mutex> lock(g_active_mu);
++    conn = std::move(g_active);
++  }
++  if (!conn) return;
++  {
++    std::lock_guard<std::mutex> lock(conn->mu);
++    conn->release = true;
++  }
++  conn->cv.notify_all();
++}
++
++// ---------------------------------------------------------------------------
++// Hooks. Every cleanup/reboot hook runs on the main thread; send_reply hands
++// the fixed line to the socket worker and waits for its bounded write result.
++// ---------------------------------------------------------------------------
++
++FreshCapture ReadFreshHook() {
++  if (!SecurityReadyForOperation()) return FreshCapture{false, {}};
++  std::vector<std::string> argv;
++  {
++    std::lock_guard<std::mutex> lock(g_state_mu);
++    argv = g_argv;
++  }
++  Capture fresh = BuildFreshCapture(argv);
++  return FreshCapture{fresh.bcb_status == ReadStatus::kOk, std::move(fresh)};
++}
++
++ClearResult StandardClearHook() {
++  if (!SecurityReadyForOperation()) return {};
++  RecoveryUI* ui = nullptr;
++  {
++    std::lock_guard<std::mutex> lock(g_state_mu);
++    ui = g_ui;
++  }
++  if (ui == nullptr) return ClearResult{};
++  // The real, observable FinishRecovery clear: standard bootloader_message
++  // write+fsync, locale/log tail and the command-file unlink.
++  const RecoveryCleanupResult result =
++      FinishRecoveryChecked(ui, RecoveryFinishMode::kFull);
++  // clear_bootloader_message() returns true only after the standard write and
++  // fsync succeeded, so a cleared BCB is the real write+fsync result.
++  const bool cleared = result.bcb_cleared;
++  return ClearResult{cleared, cleared, cleared};
++}
++
++ReadbackResult ReadbackHook() {
++  if (!SecurityReadyForOperation()) return ReadbackResult{false, false, false};
++  bootloader_message boot = {};
++  std::string err;
++  if (!read_bootloader_message(&boot, &err)) {
++    LOG(ERROR) << "rothko-normal-exit: BCB readback failed: " << err;
++    return ReadbackResult{false, false, false};
++  }
++  const bool clean = AllZero(boot.command) && AllZero(boot.status) && AllZero(boot.recovery) &&
++                     AllZero(boot.stage) && AllZero(boot.reserved);
++  if (clean) g_verified_clear.store(true);
++  return ReadbackResult{true, true, clean};
++}
++
++BoolResult CommandStatusHook() {
++  if (!SecurityReadyForOperation()) return BoolResult{false, false};
++  if (!HasCache()) return BoolResult{true, true};
++  if (ensure_path_mounted(kCommandFile) != 0) return BoolResult{false, false};
++  if (access(kCommandFile, F_OK) == 0) return BoolResult{true, false};
++  return BoolResult{true, errno == ENOENT};
++}
++
++ReplyResult SendReplyHook(std::string_view line) {
++  if (!SecurityReadyForOperation()) return ReplyResult{false, false};
++  const std::shared_ptr<ActiveConnection> conn = GrabActive();
++  if (!conn) return ReplyResult{false, false};
++  std::unique_lock<std::mutex> lock(conn->mu);
++  if (conn->closed || conn->release) return ReplyResult{false, false};
++  conn->reply_line.assign(line);
++  conn->reply_pending = true;
++  conn->cv.notify_all();
++  const bool done = conn->cv.wait_for(lock, std::chrono::milliseconds(kReplyTimeoutMs),
++                                      [&conn] {
++                                        return conn->reply_done || conn->release || conn->closed;
++                                      });
++  if (!done || !conn->reply_ok) return ReplyResult{false, false};
++  // Diagnostics only, after the actual fixed reply was written. All original
++  // peer-close, security and final-readback eligibility checks still run.
++  postcommit::ObserveCommittedReply();
++  postcommit::Phase("committed_reply_observed");
++  return ReplyResult{true, true};
++}
++
++RebootResult RebootEligibleHook() {
++  postcommit::Phase("final_security.before");
++  if (!SecurityReadyForOperation()) {
++    postcommit::Phase("final_security.hold");
++    return {};
++  }
++  postcommit::Phase("final_security.after");
++  postcommit::Phase("final_readback.before");
++  const ReadbackResult final_read = ReadbackHook();
++  postcommit::Phase("final_readback.after");
++  if (!final_read.ok || !final_read.read_ok || !final_read.clean) {
++    return RebootResult{false, false};
++  }
++  return RebootResult{true, true};
++}
++
++Hooks MakeHooks() {
++  Hooks hooks;
++  hooks.read_fresh = [] { return ReadFreshHook(); };
++  hooks.standard_clear = [] { return StandardClearHook(); };
++  hooks.readback_verify = [] { return ReadbackHook(); };
++  hooks.command_cleanup_status = [] { return CommandStatusHook(); };
++  hooks.send_reply = [](std::string_view line) { return SendReplyHook(line); };
++  hooks.eligible_device_reboot = [] { return RebootEligibleHook(); };
++  return hooks;
++}
++
++// ---------------------------------------------------------------------------
++// Server identity banner. Values are read, never invented: the kernel boot ID
++// and a build ID that main sets. If either is unavailable the connection is
++// rejected before any normal frame is read.
++// ---------------------------------------------------------------------------
++
++bool IsUuid(const std::string& value) {
++  if (value.size() != 36) return false;
++  for (std::size_t i = 0; i < value.size(); ++i) {
++    const char c = value[i];
++    if (i == 8 || i == 13 || i == 18 || i == 23) {
++      if (c != '-') return false;
++      continue;
++    }
++    const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
++    if (!hex) return false;
++  }
++  return true;
++}
++
++bool ReadIdentity(std::string* boot_id, std::string* build_id) {
++  std::string content;
++  if (!android::base::ReadFileToString(kBootIdPath, &content)) return false;
++  *boot_id = android::base::Trim(content);
++  if (!IsUuid(*boot_id)) return false;
++  *build_id = android::base::GetProperty(kBuildIdProperty, "");
++  if (*build_id != kExpectedBuildId) return false;
++  if (build_id->empty() || build_id->size() > 64) return false;
++  for (const char c : *build_id) {
++    if (static_cast<unsigned char>(c) <= 0x20 || static_cast<unsigned char>(c) > 0x7e) {
++      return false;
++    }
++  }
++  return true;
++}
++
++// ---------------------------------------------------------------------------
++// Socket worker. Authenticate, parse one fixed frame, queue it in the
++// coordinator and keep the connection open for the main-thread reply decision.
++// No cleanup, reboot, exec or shell happens here.
++// ---------------------------------------------------------------------------
++
++void ServeConnection(int fd) {
++  if (!SecurityReadyForOperation()) { close(fd); return; }
++  auto conn = std::make_shared<ActiveConnection>();
++  conn->fd = fd;
++
++  const PeerIdentity peer = ReadPeerIdentity(fd);
++  if (!AuthorizePeer(peer)) {
++    LOG(WARNING) << "rothko-normal-exit: rejected peer identity";
++    (void)WriteAll(fd, kRejectedLine, kReplyTimeoutMs);
++    close(fd);
++    return;
++  }
++
++  std::string boot_id;
++  std::string build_id;
++  if (!ReadIdentity(&boot_id, &build_id)) {
++    LOG(WARNING) << "rothko-normal-exit: identity unavailable; rejected";
++    (void)WriteAll(fd, kRejectedLine, kReplyTimeoutMs);
++    close(fd);
++    return;
++  }
++  const std::string banner = "ROTHKO-IDENT/1 " + boot_id + " " + build_id + "\n";
++  if (banner.size() > kMaxIdentityBanner || !WriteAll(fd, banner, kReplyTimeoutMs)) {
++    close(fd);
++    return;
++  }
++
++  const FrameReadResult frame = ReadNormalFrame(fd, kFrameTimeoutMs);
++  if (!SecurityReadyForOperation()) { close(fd); return; }
++  Coordinator* coord = Coord();
++  if (coord == nullptr) {
++    close(fd);
++    return;
++  }
++  const PeerCredentials cred{peer.getcred_ok, static_cast<std::uint32_t>(peer.uid),
++                             peer.getsec_ok, peer.sid};
++  const RequestOutcome outcome =
++      coord->RequestNormal(cred, frame.status, frame.line, coord->generation());
++  if (!outcome.should_wake_top_menu) {
++    (void)WriteAll(fd, kRejectedLine, kReplyTimeoutMs);
++    close(fd);
++    return;
++  }
++
++  {
++    std::lock_guard<std::mutex> lock(g_active_mu);
++    g_active = conn;
++  }
++  {
++    std::lock_guard<std::mutex> lock(g_state_mu);
++    if (g_ui != nullptr) g_ui->InterruptKey();
++  }
++
++  const auto deadline =
++      std::chrono::steady_clock::now() + std::chrono::milliseconds(kPendingDeadlineMs);
++  for (;;) {
++    {
++      std::unique_lock<std::mutex> lock(conn->mu);
++      if (conn->reply_pending) {
++        const std::string line = conn->reply_line;
++        conn->reply_pending = false;
++        lock.unlock();
++        const bool ok = WriteAll(fd, line, kReplyTimeoutMs);
++        lock.lock();
++        conn->reply_done = true;
++        conn->reply_ok = ok;
++        lock.unlock();
++        conn->cv.notify_all();
++        continue;
++      }
++      if (conn->release || conn->closed) break;
++    }
++
++    if (std::chrono::steady_clock::now() >= deadline) {
++      // The main thread never reached the commit decision. Fail closed: hold the
++      // session without cleanup instead of wedging the only socket worker.
++      coord->OnPeerClosed();
++      {
++        std::lock_guard<std::mutex> lock(conn->mu);
++        conn->closed = true;
++      }
++      break;
++    }
++
++    struct pollfd fds[2] = {{fd, POLLIN, 0}, {g_stop_pipe[0], POLLIN, 0}};
++    const int polled = poll(fds, 2, kPollSliceMs);
++    if (polled > 0) {
++      if (fds[1].revents & POLLIN) break;
++      if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
++        char peek = 0;
++        const ssize_t got = recv(fd, &peek, 1, MSG_PEEK | MSG_DONTWAIT);
++        if (got == 0 || (got < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
++          coord->OnPeerClosed();
++          {
++            std::lock_guard<std::mutex> lock(conn->mu);
++            conn->closed = true;
++          }
++          break;
++        }
++        if (got > 0) {
++          // A second frame on the same connection is a duplicate; queue it so
++          // the coordinator records the repeat rejection without cleanup.
++          const FrameReadResult repeat = ReadNormalFrame(fd, kFrameTimeoutMs);
++          (void)coord->RequestNormal(cred, repeat.status, repeat.line, coord->generation());
++          (void)WriteAll(fd, kRejectedLine, kReplyTimeoutMs);
++        }
++      }
++    }
++    if (g_stopping.load()) break;
++  }
++
++  {
++    std::lock_guard<std::mutex> lock(g_active_mu);
++    if (g_active == conn) g_active.reset();
++  }
++  close(fd);
++}
++
++void WorkerMain() {
++  while (!g_stopping.load()) {
++    struct pollfd fds[2] = {{g_listen_fd, POLLIN, 0}, {g_stop_pipe[0], POLLIN, 0}};
++    const int polled = poll(fds, 2, -1);
++    if (polled < 0) {
++      if (errno == EINTR) continue;
++      break;
++    }
++    if (fds[1].revents & POLLIN) break;
++    if (!(fds[0].revents & POLLIN)) continue;
++
++    const int fd = accept(g_listen_fd, nullptr, nullptr);
++    if (fd < 0) {
++      if (errno == EINTR) continue;
++      continue;
++    }
++    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
++    ServeConnection(fd);
++  }
++}
++
++bool OpenStopPipe() {
++  if (pipe(g_stop_pipe) != 0) return false;
++  (void)fcntl(g_stop_pipe[0], F_SETFD, FD_CLOEXEC);
++  (void)fcntl(g_stop_pipe[1], F_SETFD, FD_CLOEXEC);
++  return true;
++}
++
++}  // namespace
++
++bool SecurityReadyForOperation() {
++  if (!kCompiledIn) return true;
++  if (g_security_hold.load()) return false;
++  if (!enforcement::KernelIsEnforcing()) {
++    g_security_hold.store(true);
++    LOG(ERROR) << "rothko-normal-exit: security hold; actual Enforcing required";
++    return false;
++  }
++  return !g_security_hold.load();
++}
++
++bool FeatureEnabled() {
++  if (!kCompiledIn || !SecurityReadyForOperation()) return false;
++  // Ordinary authenticated USER adbd only. Unknown values and trade-in/FOYER
++  // admission fail closed; UID/SID alone is not transport authentication.
++  if (android::base::GetProperty("ro.secure", "") != "1" ||
++      android::base::GetProperty("ro.adb.secure", "") != "1" ||
++      android::base::GetProperty("ro.debuggable", "") != "0") return false;
++  const std::string tradein = android::base::GetProperty("persist.adb.tradeinmode", "");
++  if (!tradein.empty() && tradein != "0") return false;
++  return android::base::GetBoolProperty(kFeatureProperty, false);
++}
++
++void CaptureBeforeGetArgs(int argc, char** argv, std::string* stage) {
++  if (!FeatureEnabled()) return;
++
++  std::vector<std::string> options;
++  for (int i = 1; i < argc; ++i) options.emplace_back(argv[i]);
++
++  Capture capture = BuildFreshCapture(options);
++  if (stage != nullptr) *stage = capture.stage.value_or("");
++
++  const bool raw_clean = CaptureIsClean(capture);
++  if (raw_clean) ApplyGetArgsRewrite(&capture, options);
++
++  InitialCapture& initial = Initial();
++  std::lock_guard<std::mutex> lock(initial.mu);
++  initial.valid = true;
++  initial.raw_clean = raw_clean;
++  initial.argv = std::move(options);
++  initial.capture = std::move(capture);
++}
++
++void Start(RecoveryUI* ui) {
++  if (!FeatureEnabled()) return;
++
++  InitialCapture& initial = Initial();
++  Capture capture;
++  std::vector<std::string> argv;
++  bool raw_clean = false;
++  {
++    std::lock_guard<std::mutex> lock(initial.mu);
++    if (!initial.valid) {
++      LOG(ERROR) << "rothko-normal-exit: capture missing; feature inert";
++      return;
++    }
++    capture = initial.capture;
++    argv = initial.argv;
++    raw_clean = initial.raw_clean;
++  }
++
++  const int fd = android_get_control_socket(kSocketName);
++  if (fd < 0) {
++    LOG(ERROR) << "rothko-normal-exit: socket unavailable; feature inert";
++    return;
++  }
++  (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
++  if (listen(fd, 1) != 0) {
++    PLOG(ERROR) << "rothko-normal-exit: listen failed; feature inert";
++    close(fd);
++    return;
++  }
++  if (!OpenStopPipe()) {
++    close(fd);
++    return;
++  }
++
++  {
++    std::lock_guard<std::mutex> lock(g_state_mu);
++    g_ui = ui;
++    g_argv = std::move(argv);
++    g_coord = std::make_unique<Coordinator>(std::move(capture), MakeHooks());
++    g_listen_fd = fd;
++    g_listening = true;
++  }
++  g_verified_clear.store(false);
++  g_stopping.store(false);
++  g_worker = std::thread(WorkerMain);
++  LOG(INFO) << "rothko-normal-exit: adapter started, capture "
++            << (raw_clean ? "clean" : "blocked") << ", state " << ToString(Coord()->state());
++}
++
++void EnsureTopMenuWindow(bool is_main_menu) {
++  Coordinator* coord = Coord();
++  if (coord == nullptr) return;
++  if (!is_main_menu) {
++    (void)coord->LeaveTopMenu();
++    return;
++  }
++  if (!coord->top_menu_open()) (void)coord->EnterTopMenu();
++}
++
++void LeaveTopMenuWindow() {
++  Coordinator* coord = Coord();
++  if (coord != nullptr) (void)coord->LeaveTopMenu();
++}
++
++bool PromptClearDeferred() {
++  if (!SecurityReadyForOperation()) return true;
++  std::lock_guard<std::mutex> lock(g_state_mu);
++  return g_listening;
++}
++
++bool ConsumeVerifiedClear() {
++  return g_verified_clear.exchange(false);
++}
++
++bool DefaultRebootSuppressed() {
++  if (!SecurityReadyForOperation()) return true;
++  Coordinator* coord = Coord();
++  if (coord == nullptr) return false;
++  switch (coord->state()) {
++    case State::kBlocked:
++    case State::kErrorHold:
++    case State::kNormalPending:
++    case State::kCommitting:
++      return true;
++    case State::kIdleClean:
++    case State::kCommitted:
++      return false;
++  }
++  return true;
++}
++
++PromptInterrupt OnPromptInterrupt() {
++  if (!SecurityReadyForOperation()) {
++    if (Coordinator* coord = Coord(); coord != nullptr) coord->OnPeerClosed();
++    ReleaseActive();
++    return PromptInterrupt::kErrorHold;
++  }
++  Coordinator* coord = Coord();
++  if (coord == nullptr) return PromptInterrupt::kNotOurs;
++  if (coord->pending_token() == 0) return PromptInterrupt::kNotOurs;
++  if (coord->state() != State::kNormalPending) return PromptInterrupt::kNotOurs;
++
++  const CommitOutcome outcome = coord->ConfirmCommit(coord->generation(), coord->pending_token());
++  postcommit::Phase("confirm_commit.after");
++  postcommit::Phase("release_active.before");
++  ReleaseActive();
++  postcommit::Phase("release_active.after");
++  switch (outcome.result) {
++    case Result::kCommittedNotBootValidated:
++      postcommit::Phase("interrupt_return_reboot");
++      return PromptInterrupt::kReboot;
++    case Result::kErrorHold:
++    case Result::kBlockedCapture:
++      postcommit::Phase("interrupt_return_error_hold");
++      return PromptInterrupt::kErrorHold;
++    case Result::kCommitCancelledWindow:
++    case Result::kRejectedStaleWindow:
++    case Result::kRejectedStaleToken:
++    case Result::kRejectedBusy:
++      return PromptInterrupt::kKeepMenu;
++    default:
++      return PromptInterrupt::kKeepMenu;
++  }
++}
++
++void Stop() {
++  {
++    std::lock_guard<std::mutex> lock(g_state_mu);
++    g_listening = false;
++  }
++  g_stopping.store(true);
++  if (g_stop_pipe[1] >= 0) {
++    const char wake = 1;
++    (void)write(g_stop_pipe[1], &wake, 1);
++  }
++  if (g_worker.joinable()) g_worker.join();
++  ReleaseActive();
++
++  int fd = -1;
++  int stop_read = -1;
++  int stop_write = -1;
++  {
++    std::lock_guard<std::mutex> lock(g_state_mu);
++    fd = g_listen_fd;
++    g_listen_fd = -1;
++    g_ui = nullptr;
++    g_coord.reset();
++  }
++  stop_read = g_stop_pipe[0];
++  stop_write = g_stop_pipe[1];
++  g_stop_pipe[0] = -1;
++  g_stop_pipe[1] = -1;
++  if (fd >= 0) close(fd);
++  if (stop_read >= 0) close(stop_read);
++  if (stop_write >= 0) close(stop_write);
++}
++
++}  // namespace rothko::recovery::bridge
+diff --git a/recovery_normal_exit_bridge.h b/recovery_normal_exit_bridge.h
+new file mode 100644
+index 00000000..ae3b138b
+--- /dev/null
++++ b/recovery_normal_exit_bridge.h
+@@ -0,0 +1,85 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <string>
++
++class RecoveryUI;
++
++// Thin same-process adapter between the recovery main loop / UI and the
++// normal-exit coordinator core in normal_exit/. The socket worker only
++// authenticates, emits the fixed identity banner, parses and queues a request;
++// every cleanup, reply decision and reboot eligibility is executed on the main
++// thread through these calls.
++//
++// Default-OFF: the adapter is compiled in but inert. FeatureEnabled() is false
++// unless the runtime property ro.rothko.recovery.normal_exit is "1" (and the
++// init socket exists). Define ROTHKO_RECOVERY_NORMAL_EXIT=0 for the recovery
++// target to remove the adapter at build time. This stage enables no device.
++namespace rothko::recovery::bridge {
++
++bool FeatureEnabled();
++
++// Device-private safety gate independent of IPC/property enablement. A failed
++// read or non-Enforcing observation holds this process until a fresh start.
++bool SecurityReadyForOperation();
++
++// Called from recovery_main() before get_args() can rewrite the BCB. Captures
++// argv, the full bootloader_message, stage and the command-file status. The
++// captured BCB is canonicalized exactly as get_args()/update_bootloader_message()
++// will rewrite it, but only after the *raw* capture was validated as clean.
++void CaptureBeforeGetArgs(int argc, char** argv, std::string* stage);
++
++// Called once the RecoveryUI exists. Creates the coordinator and the socket
++// listener when the feature is enabled. If the socket is unavailable the
++// feature stays inert and the pre-existing recovery behaviour is unchanged.
++void Start(RecoveryUI* ui);
++
++// Main-thread top-menu window bookkeeping. is_main_menu=false closes the window
++// (a submenu / wipe / advanced screen is not a valid normal-exit window).
++void EnsureTopMenuWindow(bool is_main_menu);
++void LeaveTopMenuWindow();
++
++// True while the prompt-time FinishRecovery() must not clear the BCB because the
++// pre-get_args capture and the commit fresh read have to describe the same BCB.
++// False once the feature is inert, preserving the original call semantics.
++bool PromptClearDeferred();
++
++// Consumes the one-shot flag set after a post-clear BCB readback proved empty.
++// The generic FinishRecovery() tail then skips a second protected clear.
++bool ConsumeVerifiedClear();
++
++// True while a blocked/held/pending normal-exit session must not take the menu
++// timeout/default reboot path. ERROR_HOLD, a blocked capture and an in-flight
++// request keep the menu alive instead of auto-rebooting over pending work.
++bool DefaultRebootSuppressed();
++
++enum class PromptInterrupt {
++  kNotOurs,    // another thread interrupted the menu (mode switch); keep old behaviour
++  kKeepMenu,   // our request was rejected/cancelled; stay in the menu
++  kReboot,     // committed and verified; return Device::REBOOT to recovery_main
++  kErrorHold,  // fail-closed; do not clear and do not reboot
++};
++
++// Runs the whole commit on the calling (main) thread.
++PromptInterrupt OnPromptInterrupt();
++
++// Joins the worker. Recovery normally reboots instead of returning, but the
++// runtime is still stoppable for tests and for a future orderly exit.
++void Stop();
++
++}  // namespace rothko::recovery::bridge
+diff --git a/static_transition_facts.h b/static_transition_facts.h
+new file mode 100644
+index 00000000..637f6f5d
+--- /dev/null
++++ b/static_transition_facts.h
+@@ -0,0 +1,53 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <errno.h>
++#include <sys/auxv.h>
++
++#include <elf.h>
++
++// Shared auxv read facts for the static launcher and the earliest-main guard.
++//
++// getauxval() returns 0 and sets errno=ENOENT when the auxv entry is absent.
++// A bare 0 is therefore NOT proof that AT_SECURE exists and is zero.  The
++// reader clears errno first and immediately captures it, and callers must
++// require `valid` before interpreting `value`.
++namespace rothko::recovery::transition {
++
++struct AuxvFacts {
++  unsigned long value = 0;
++  int saved_errno = 0;
++  bool valid = false;
++};
++
++inline AuxvFacts MakeAuxvFacts(unsigned long value, int saved_errno) {
++  AuxvFacts facts;
++  facts.value = value;
++  facts.saved_errno = saved_errno;
++  facts.valid = saved_errno == 0;
++  return facts;
++}
++
++inline AuxvFacts ReadAtSecureAuxv() {
++  errno = 0;
++  const unsigned long value = getauxval(AT_SECURE);
++  const int saved_errno = errno;
++  return MakeAuxvFacts(value, saved_errno);
++}
++
++}  // namespace rothko::recovery::transition
