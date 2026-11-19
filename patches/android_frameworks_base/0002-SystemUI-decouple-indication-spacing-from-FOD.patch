@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Rothko Device Maintainers <noreply@rothko.invalid>
+Date: Tue, 17 Nov 2026 15:45:00 +0000
+Subject: [PATCH] SystemUI: decouple indication spacing from the legacy FOD bridge
+
+The Lineage fingerprint HAL does not enable the old framework FOD bridge.
+Keep the existing indication-to-entry constraints behind an independent UI
+resource, enabled by the rothko SystemUI overlay, so charging text cannot
+fall back below the sensor and overlap the fingerprint circle.
+
+diff --git a/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/DefaultIndicationAreaSection.kt b/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/DefaultIndicationAreaSection.kt
+--- a/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/DefaultIndicationAreaSection.kt
++++ b/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/DefaultIndicationAreaSection.kt
+@@ -30,7 +30,6 @@
+ import com.android.systemui.keyguard.shared.model.KeyguardSection
+ import com.android.systemui.keyguard.ui.binder.KeyguardIndicationAreaBinder
+ import com.android.systemui.keyguard.ui.view.KeyguardIndicationArea
+-import com.android.systemui.keyguard.ui.view.RothkoKeyguardGeometry
+ import com.android.systemui.keyguard.ui.viewmodel.DeviceEntryIconViewModel
+ import com.android.systemui.keyguard.ui.viewmodel.KeyguardIndicationAreaViewModel
+ import com.android.systemui.lifecycle.repeatWhenAttached
+@@ -56,7 +55,8 @@
+     private var indicationAreaHandle: DisposableHandle? = null
+     private var spacingHandle: DisposableHandle? = null
+     private var rootView: ConstraintLayout? = null
+-    private val useRothkoSpacing = RothkoKeyguardGeometry.enabled(context)
++    private val useRothkoSpacing =
++        context.resources.getBoolean(R.bool.config_rothkoIndicationSpacingEnabled)
+ 
+     override fun addViews(constraintLayout: ConstraintLayout) {
+         rootView = constraintLayout
+diff --git a/packages/SystemUI/res/values/config.xml b/packages/SystemUI/res/values/config.xml
+--- a/packages/SystemUI/res/values/config.xml
++++ b/packages/SystemUI/res/values/config.xml
+@@ -1186,4 +1186,7 @@
+ 
+     <!-- Indicates whether the tapping to open qs panel is supported -->
+     <bool name="config_statusBarTapToExpandShade">false</bool>
++    <!-- Keep lockscreen indication above the UDFPS entry on devices that opt in.
++         This layout policy is independent of the legacy FOD state bridge. -->
++    <bool name="config_rothkoIndicationSpacingEnabled">false</bool>
+ </resources>

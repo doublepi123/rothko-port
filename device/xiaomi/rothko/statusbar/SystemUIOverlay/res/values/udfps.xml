@@ -7,4 +7,6 @@
 -->
 <resources>
     <item name="pixel_pitch" format="float" type="dimen">57.0</item>
+    <!-- Layout only: reserve space above the actual UDFPS entry bounds. -->
+    <bool name="config_rothkoIndicationSpacingEnabled">true</bool>
 </resources>
