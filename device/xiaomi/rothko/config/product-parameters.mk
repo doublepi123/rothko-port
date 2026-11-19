@@ -23,14 +23,12 @@ PRODUCT_VIRTUAL_AB_COMPRESSION_FACTOR := 4096
 PRODUCT_VIRTUAL_AB_OTA := true
 
 AB_OTA_UPDATER := true
+# List only images built or staged by this offline configuration.
 AB_OTA_PARTITIONS += \
     boot \
     init_boot \
     vendor_boot \
     dtbo \
-    vbmeta \
-    vbmeta_system \
-    vbmeta_vendor \
     odm \
     odm_dlkm \
     product \

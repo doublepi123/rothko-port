@@ -47,6 +47,11 @@ FRAMEWORK_GOALS = {
 # Explicitly authorized module compilation, never recovery/vendor_boot images
 # or a release/full-ROM admission. Mixed or unknown goals retain release gates.
 RECOVERY_MODULE_GOALS = {"recovery", "recovery-launcher", "librecovery_ui_ext"}
+# Compiling a complete development image/target-files set must precede its
+# compatibility and hardware acceptance. Distribution targets stay release-only.
+DEVELOPMENT_GOALS = FRAMEWORK_GOALS | {
+    "droid", "droidcore", "target-files-package", "dist", "check_target_files_vintf",
+}
 CHUNK = 1024 * 1024
 
 
@@ -1037,6 +1042,7 @@ def main() -> int:
     parser.add_argument("--make", action="store_true", help="emit one gate line for make")
     parser.add_argument("--make-goals", default="")
     parser.add_argument("--make-context", choices=("configuration", "build"), default="build")
+    parser.add_argument("--build-purpose", choices=("release", "development"), default="release")
     parser.add_argument("--makefile-list", default="")
     parser.add_argument("--original-goals", default="")
     parser.add_argument("--kati-context-report-dir", type=Path)
@@ -1064,12 +1070,12 @@ def main() -> int:
     cfg = load_json(config_path)
 
     if args.make and not args.mode == "evidence":
-        goals = {goal for goal in args.make_goals.split() if goal}
+        goals = set(args.make_goals.split()) | set(args.original_goals.split())
         if goals and goals <= CLEAN_GOALS:
             return 0
 
     errors: list[str] = []
-    goals = {goal for goal in args.make_goals.split() if goal}
+    goals = set(args.make_goals.split()) | set(args.original_goals.split())
     provenance = kati_context.inspect(device_root) if args.make else {"approved_cleanspec": False}
     trusted_empty_cleanspec = args.make and not goals and provenance.get("approved_cleanspec") is True
     configuration_only = bool(
@@ -1081,11 +1087,16 @@ def main() -> int:
     )
     framework_only = bool(args.make and goals and goals <= FRAMEWORK_GOALS)
     recovery_modules_only = bool(args.make and goals and goals <= RECOVERY_MODULE_GOALS)
+    requested_goals = goals | set(args.original_goals.split())
+    development_only = bool(
+        args.make and args.build_purpose == "development"
+        and requested_goals and requested_goals <= DEVELOPMENT_GOALS
+    )
     if args.mode in ("build", "all"):
         check_generated(device_root, errors)
         check_identity(cfg, errors)
         check_budget(cfg, errors)
-        if configuration_only or framework_only or recovery_modules_only:
+        if configuration_only or framework_only or recovery_modules_only or development_only:
             # Buildable-input layer: real product config, vendor contract and
             # staged image manifest only. Do not require framework compatibility
             # results that cannot exist before these finite modules are built.
@@ -1119,6 +1130,7 @@ def main() -> int:
                 "original_goals": args.original_goals, "requested_context": args.make_context,
                 "configuration_only": configuration_only, "framework_only": framework_only,
                 "recovery_modules_only": recovery_modules_only,
+                "build_purpose": args.build_purpose, "development_only": development_only,
                 "ancestor": provenance, "gate_errors": errors, "passed": not errors}
             target = report_dir / f"context-{os.getpid()}-{time.time_ns()}.json"
             target.write_text(json.dumps(report, indent=2) + "\n")

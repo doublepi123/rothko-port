@@ -117,12 +117,32 @@ def render_board(cfg: dict) -> str:
     return "\n".join(lines)
 
 
+def validate_ota_partition_plan(plan: dict) -> list[str]:
+    if plan["avb"]["enabled"] is not False:
+        raise ValueError("this offline tree requires AVB signing to remain disabled")
+    produced = [*plan["built_by_lineage"], *plan["stock_prebuilt"]]
+    parts = plan["ota_partitions"]
+    if not isinstance(parts, list) or any(not isinstance(part, str) for part in parts):
+        raise ValueError("OTA partitions must be a list of image names")
+    if len(produced) != len(set(produced)) or len(parts) != len(set(parts)):
+        raise ValueError("duplicate partition in the image or OTA plan")
+    expected = set(produced)
+    if set(parts) != expected:
+        raise ValueError(
+            "OTA partitions must match the built or staged image plan: "
+            f"missing={sorted(expected - set(parts))}, "
+            f"unavailable={sorted(set(parts) - expected)}"
+        )
+    return parts
+
+
 def render_product(cfg: dict) -> str:
     device = cfg["device"]
     arch = cfg["architecture"]
     validate_app_mode(arch)
     vab = cfg["virtual_ab"]
     plan = cfg["build_plan"]
+    parts = validate_ota_partition_plan(plan)
 
     lines = [HEADER]
     lines.append("# Match the device-specific ODM zygote; do not use the generic mgvi template.")
@@ -145,8 +165,8 @@ def render_product(cfg: dict) -> str:
     lines.append(f"PRODUCT_VIRTUAL_AB_OTA := {_bool(vab['vabc_enabled'])}")
     lines.append("")
     lines.append("AB_OTA_UPDATER := true")
+    lines.append("# List only images built or staged by this offline configuration.")
     lines.append("AB_OTA_PARTITIONS += \\")
-    parts = plan["ota_partitions"]
     for index, part in enumerate(parts):
         suffix = " \\" if index != len(parts) - 1 else ""
         lines.append(f"    {part}{suffix}")

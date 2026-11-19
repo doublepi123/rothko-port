@@ -1,0 +1,441 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Rothko Port Maintainers <rothko-port@example.invalid>
+Date: Sun, 15 Nov 2026 23:00:00 +0000
+Subject: [PATCH] java: optionally share highmem pool across local JVM actions
+
+Memory-constrained local builds can enter sustained reclaim while many
+4/8 GiB JVM compilers run at once. NINJA_HIGHMEM_NUM_JOBS alone does not
+cover ordinary javac, Kotlin, turbine and dex rules.
+
+Opt in with SOONG_JAVA_HIGHMEM_POOL=true and set the existing highmem pool
+depth through NINJA_HIGHMEM_NUM_JOBS. Keep native concurrency unchanged.
+Include signing, jar transforms, lint, Javadoc and Metalava JVM actions.
+Preserve default and remote-build scheduling. Test actual generated Ninja
+rules with the switch on/off and remote configuration on/off.
+
+---
+diff --git a/java/Android.bp b/java/Android.bp
+index cf1be3a89..6e4078107 100644
+--- a/java/Android.bp
++++ b/java/Android.bp
+@@ -43,6 +43,7 @@ bootstrap_go_package {
+         "bootclasspath.go",
+         "bootclasspath_fragment.go",
+         "builder.go",
++        "jvm_pool.go",
+         "classpath_element.go",
+         "classpath_fragment.go",
+         "device_host_converter.go",
+@@ -94,6 +95,7 @@ bootstrap_go_package {
+         "tradefed.go",
+     ],
+     testSrcs: [
++        "jvm_pool_test.go",
+         "aar_test.go",
+         "android_manifest_test.go",
+         "androidmk_test.go",
+diff --git a/java/app_builder.go b/java/app_builder.go
+index c9d315240..f78712190 100644
+--- a/java/app_builder.go
++++ b/java/app_builder.go
+@@ -30,7 +30,7 @@ import (
+ )
+ 
+ var (
+-	Signapk, SignapkRE = pctx.RemoteStaticRules("signapk",
++	Signapk, SignapkRE = javaRemoteStaticRules("signapk",
+ 		blueprint.RuleParams{
+ 			Command: `rm -f $out && $reTemplate${config.JavaCmd} ${config.JavaVmFlags} -Djava.library.path=$$(dirname ${config.SignapkJniLibrary}) ` +
+ 				`-jar ${config.SignapkCmd} $flags $certificates $in $out`,
+diff --git a/java/builder.go b/java/builder.go
+index 566eed581..11a5a37ec 100644
+--- a/java/builder.go
++++ b/java/builder.go
+@@ -72,7 +72,7 @@ var (
+ 	// * Does not remove the temp directories containing classes/generated sources
+ 	// * Saves the states of a bunch of input params, when javac executes successfully.
+ 	// * Runs additional tools on the output to prepare for next iteration
+-	javacInc, javacIncRE = pctx.MultiCommandRemoteStaticRules("javac-inc",
++	javacInc, javacIncRE = javaMultiCommandRemoteStaticRules("javac-inc",
+ 		blueprint.RuleParams{
+ 			Command: `rm -rf "$annoSrcJar.tmp" "$out.tmp" && ` +
+ 				`mkdir -p "$annoDir" && ` +
+@@ -144,7 +144,7 @@ var (
+ 	// this, all java rules write into separate directories and then are combined into a .jar file
+ 	// (if the rule produces .class files) or a .srcjar file (if the rule produces .java files).
+ 	// .srcjar files are unzipped into a temporary directory when compiled with javac.
+-	javac, javacRE = pctx.MultiCommandRemoteStaticRules("javac",
++	javac, javacRE = javaMultiCommandRemoteStaticRules("javac",
+ 		blueprint.RuleParams{
+ 			Command: `rm -rf "$outDir" "$annoDir" "$annoSrcJar.tmp" "$srcJarDir" "$out.tmp" && ` +
+ 				`mkdir -p "$outDir" "$annoDir" "$srcJarDir" && ` +
+@@ -206,7 +206,7 @@ var (
+ 	// Run it with several --add-exports to allow the classes in the
+ 	// com.google.devtools.kythe.extractors.java.standalone package access the packages in the
+ 	// jdk.compiler compiler module. Long live Java modules.
+-	kytheExtract = pctx.AndroidStaticRule("kythe",
++	kytheExtract = javaStaticRule("kythe",
+ 		blueprint.RuleParams{
+ 			Command: `${config.ZipSyncCmd} -d $srcJarDir ` +
+ 				`-l $srcJarDir/list -f "*.java" $srcJars && ` +
+@@ -261,7 +261,7 @@ var (
+ 		},
+ 		"abis", "allow-prereleased", "screen-densities", "sdk-version", "skip-sdk-check", "stem", "apkcerts", "partition", "zip")
+ 
+-	turbine, turbineRE = pctx.RemoteStaticRules("turbine",
++	turbine, turbineRE = javaRemoteStaticRules("turbine",
+ 		blueprint.RuleParams{
+ 			Command: `$reTemplate${config.JavaCmd} ${config.JavaVmFlags} -jar ${config.TurbineJar} $outputFlags ` +
+ 				`--sources @$out.rsp ` +
+@@ -337,7 +337,7 @@ var (
+ 			CommandDeps: []string{"${config.ExtractR8RulesCmd}"},
+ 		})
+ 
+-	jarjar = pctx.AndroidStaticRule("jarjar",
++	jarjar = javaStaticRule("jarjar",
+ 		blueprint.RuleParams{
+ 			Command: "" +
+ 				// Jarjar doesn't exit with an error when the rules file contains a syntax error,
+@@ -365,21 +365,21 @@ var (
+ 		},
+ 		"packages")
+ 
+-	jetifier = pctx.AndroidStaticRule("jetifier",
++	jetifier = javaStaticRule("jetifier",
+ 		blueprint.RuleParams{
+ 			Command:     "${config.JavaCmd}  ${config.JavaVmFlags} -jar ${config.JetifierJar} -l error -o $out -i $in -t epoch",
+ 			CommandDeps: []string{"${config.JavaCmd}", "${config.JetifierJar}"},
+ 		},
+ 	)
+ 
+-	ravenizer = pctx.AndroidStaticRule("ravenizer",
++	ravenizer = javaStaticRule("ravenizer",
+ 		blueprint.RuleParams{
+ 			Command:     "rm -f $out && ${ravenizer} --in-jar $in --out-jar $out $ravenizerArgs",
+ 			CommandDeps: []string{"${ravenizer}"},
+ 		},
+ 		"ravenizerArgs")
+ 
+-	apimapper = pctx.AndroidStaticRule("apimapper",
++	apimapper = javaStaticRule("apimapper",
+ 		blueprint.RuleParams{
+ 			Command:     "${apimapper} --in-jar $in --out-jar $out",
+ 			CommandDeps: []string{"${apimapper}"},
+@@ -431,7 +431,7 @@ var (
+ 			CommandDeps: []string{"${aconfig-to-metalava-flags}"},
+ 		})
+ 
+-	generateApiXMLRule = pctx.AndroidStaticRule("generateApiXMLRule",
++	generateApiXMLRule = javaStaticRule("generateApiXMLRule",
+ 		blueprint.RuleParams{
+ 			Command:     `${config.JavaCmd} ${config.JavaVmFlags} -Xmx4g -jar ${config.MetalavaJar} jar-to-jdiff ${in} ${out}`,
+ 			CommandDeps: []string{"${config.JavaCmd}", "${config.MetalavaJar}"},
+diff --git a/java/dex.go b/java/dex.go
+index 8521660e3..6112cfd5e 100644
+--- a/java/dex.go
++++ b/java/dex.go
+@@ -216,7 +216,7 @@ var d8IncClean = pctx.AndroidStaticRule("d8Inc-partialcompileclean",
+ 	}, "outDir", "d8Flags", "d8Deps", "zipFlags", "mergeZipsFlags", "builtOut",
+ )
+ 
+-var d8Inc, d8IncRE = pctx.MultiCommandRemoteStaticRules("d8Inc",
++var d8Inc, d8IncRE = javaMultiCommandRemoteStaticRules("d8Inc",
+ 	blueprint.RuleParams{
+ 		Command: `mkdir -p "$outDir" "$outDir/packages" && ` +
+ 			`${config.IncrementalDexInputCmd} ` +
+@@ -261,7 +261,7 @@ var d8IncR8Clean = pctx.AndroidStaticRule("d8Incr8-partialcompileclean",
+ 	"d8Flags", "d8Deps", "r8Flags", "zipFlags", "mergeZipsFlags", "resourcesOutput", "outR8ArtProfile", "implicits",
+ )
+ 
+-var d8IncR8, d8IncR8RE = pctx.MultiCommandRemoteStaticRules("d8Incr8",
++var d8IncR8, d8IncR8RE = javaMultiCommandRemoteStaticRules("d8Incr8",
+ 	blueprint.RuleParams{
+ 		Command: `mkdir -p "$outDir" "$outDir/packages" && ` +
+ 			`rm -f "$outDict" && rm -f "$outConfig" && rm -rf "${outUsageDir}" && ` +
+@@ -324,7 +324,7 @@ var d8IncR8, d8IncR8RE = pctx.MultiCommandRemoteStaticRules("d8Incr8",
+ 	}, []string{"outDir", "outDict", "outConfig", "outUsage", "outUsageZip", "outUsageDir",
+ 		"d8Flags", "d8Deps", "r8Flags", "zipFlags", "mergeZipsFlags", "resourcesOutput", "outR8ArtProfile"}, []string{"implicits"})
+ 
+-var d8, d8RE = pctx.MultiCommandRemoteStaticRules("d8",
++var d8, d8RE = javaMultiCommandRemoteStaticRules("d8",
+ 	blueprint.RuleParams{
+ 		Command: `rm -rf "$outDir" && mkdir -p "$outDir" && ` +
+ 			`$d8Template${config.D8Cmd} ${config.D8Flags} $d8Flags --output $outDir --no-dex-input-jar $in && ` +
+@@ -363,7 +363,7 @@ var d8r8Clean = pctx.AndroidStaticRule("d8r8-partialcompileclean",
+ 	"d8Flags", "r8Flags", "zipFlags", "mergeZipsFlags", "resourcesOutput", "outR8ArtProfile", "implicits",
+ )
+ 
+-var d8r8, d8r8RE = pctx.MultiCommandRemoteStaticRules("d8r8",
++var d8r8, d8r8RE = javaMultiCommandRemoteStaticRules("d8r8",
+ 	blueprint.RuleParams{
+ 		Command: `rm -rf "$outDir" && mkdir -p "$outDir" && ` +
+ 			`rm -f "$outDict" && rm -f "$outConfig" && rm -rf "${outUsageDir}" && ` +
+@@ -421,7 +421,7 @@ var d8r8, d8r8RE = pctx.MultiCommandRemoteStaticRules("d8r8",
+ 	}, []string{"outDir", "outDict", "outConfig", "outUsage", "outUsageZip", "outUsageDir",
+ 		"d8Flags", "r8Flags", "zipFlags", "mergeZipsFlags", "resourcesOutput", "outR8ArtProfile"}, []string{"implicits"})
+ 
+-var r8, r8RE = pctx.MultiCommandRemoteStaticRules("r8",
++var r8, r8RE = javaMultiCommandRemoteStaticRules("r8",
+ 	blueprint.RuleParams{
+ 		Command: `rm -rf "$outDir" && mkdir -p "$outDir" && ` +
+ 			`rm -f "$outDict" && rm -f "$outConfig" && rm -rf "${outUsageDir}" && ` +
+diff --git a/java/droiddoc.go b/java/droiddoc.go
+index 030865f56..425ea6f54 100644
+--- a/java/droiddoc.go
++++ b/java/droiddoc.go
+@@ -556,6 +556,9 @@ func (j *Javadoc) GenerateAndroidBuildActions(ctx android.ModuleContext) {
+ 	j.stubsSrcJar = nil
+ 
+ 	rule := android.NewRuleBuilder(pctx, ctx)
++	if ctx.Config().IsEnvTrue("SOONG_JAVA_HIGHMEM_POOL") && !ctx.Config().UseRemoteBuild() {
++		rule.HighMem()
++	}
+ 
+ 	rule.Command().Text("rm -rf").Text(outDir.String())
+ 	rule.Command().Text("mkdir -p").Text(outDir.String())
+@@ -826,6 +829,9 @@ func (d *Droiddoc) GenerateAndroidBuildActions(ctx android.ModuleContext) {
+ 	srcJarDir := android.PathForModuleOut(ctx, "srcjars")
+ 
+ 	rule := android.NewRuleBuilder(pctx, ctx)
++	if ctx.Config().IsEnvTrue("SOONG_JAVA_HIGHMEM_POOL") && !ctx.Config().UseRemoteBuild() {
++		rule.HighMem()
++	}
+ 
+ 	srcJarList := zipSyncCmd(ctx, rule, srcJarDir, d.Javadoc.srcJars)
+ 
+diff --git a/java/droidstubs.go b/java/droidstubs.go
+index 6d4061f22..d940a98c9 100644
+--- a/java/droidstubs.go
++++ b/java/droidstubs.go
+@@ -913,7 +913,8 @@ func generateRevertAnnotationArgs(ctx android.ModuleContext, cmd *android.RuleBu
+ 
+ func (d *Droidstubs) commonMetalavaStubCmd(ctx android.ModuleContext, rule *android.RuleBuilder,
+ 	params stubsCommandParams) *android.RuleBuilderCommand {
+-	if BoolDefault(d.properties.High_mem, false) {
++	if BoolDefault(d.properties.High_mem, false) ||
++		(ctx.Config().IsEnvTrue("SOONG_JAVA_HIGHMEM_POOL") && !ctx.Config().UseRemoteBuild()) {
+ 		// This metalava run uses lots of memory, restrict the number of metalava jobs that can run in parallel.
+ 		rule.HighMem()
+ 	}
+diff --git a/java/jvm_pool.go b/java/jvm_pool.go
+new file mode 100644
+index 000000000..7ace42829
+--- /dev/null
++++ b/java/jvm_pool.go
+@@ -0,0 +1,59 @@
++// Copyright 2026 The Android Open Source Project
++// SPDX-License-Identifier: Apache-2.0
++
++package java
++
++import (
++	"strings"
++
++	"android/soong/android"
++	"android/soong/remoteexec"
++	"github.com/google/blueprint"
++)
++
++// Share Ninja's existing highmem_pool with Metalava. Native compilation retains
++// its normal parallelism. This is opt-in for memory-constrained local builders.
++var javaHighmemPool = blueprint.NewBuiltinPool("highmem_pool")
++
++func javaHighmemParams(params blueprint.RuleParams, enabled, remote bool) blueprint.RuleParams {
++	if enabled && !remote && params.Pool == nil {
++		params.Pool = javaHighmemPool
++	}
++	return params
++}
++
++func javaStaticRule(name string, params blueprint.RuleParams, args ...string) blueprint.Rule {
++	return pctx.RuleFunc(name, func(ctx android.PackageRuleContext) blueprint.RuleParams {
++		return javaHighmemParams(params, ctx.Config().IsEnvTrue("SOONG_JAVA_HIGHMEM_POOL"), ctx.Config().UseRemoteBuild())
++	}, args...)
++}
++
++// Preserve AndroidRemoteStaticRule's remote and local_pool behavior exactly.
++func javaAndroidRemoteStaticRule(name string, supports android.RemoteRuleSupports, params blueprint.RuleParams, args ...string) blueprint.Rule {
++	return pctx.PackageContext.RuleFunc(name, func(value interface{}) (blueprint.RuleParams, error) {
++		config := value.(android.Config)
++		result := javaHighmemParams(params, config.IsEnvTrue("SOONG_JAVA_HIGHMEM_POOL"), config.UseRemoteBuild())
++		if config.UseREWrapper() && !supports.RBE {
++			result.Pool = blueprint.NewBuiltinPool("local_pool")
++		}
++		return result, nil
++	}, args...)
++}
++
++func javaRemoteStaticRules(name string, params blueprint.RuleParams, remote *remoteexec.REParams, common, extra []string) (blueprint.Rule, blueprint.Rule) {
++	local := params
++	local.Command = strings.ReplaceAll(params.Command, "$reTemplate", "")
++	params.Command = strings.ReplaceAll(params.Command, "$reTemplate", remote.Template())
++	return javaStaticRule(name, local, common...),
++		pctx.AndroidRemoteStaticRule(name+"RE", android.RemoteRuleSupports{RBE: true}, params, append(common, extra...)...)
++}
++
++func javaMultiCommandRemoteStaticRules(name string, params blueprint.RuleParams, remote map[string]*remoteexec.REParams, common, extra []string) (blueprint.Rule, blueprint.Rule) {
++	local := params
++	for placeholder, command := range remote {
++		local.Command = strings.ReplaceAll(local.Command, placeholder, "")
++		params.Command = strings.ReplaceAll(params.Command, placeholder, command.Template())
++	}
++	return javaStaticRule(name, local, common...),
++		pctx.AndroidRemoteStaticRule(name+"RE", android.RemoteRuleSupports{RBE: true}, params, append(common, extra...)...)
++}
+diff --git a/java/jvm_pool_test.go b/java/jvm_pool_test.go
+new file mode 100644
+index 000000000..8b45a7646
+--- /dev/null
++++ b/java/jvm_pool_test.go
+@@ -0,0 +1,85 @@
++// Copyright 2026 The Android Open Source Project
++// SPDX-License-Identifier: Apache-2.0
++package java
++
++import (
++	"bytes"
++	"regexp"
++	"strings"
++	"testing"
++
++	"android/soong/android"
++	"github.com/google/blueprint"
++)
++
++func TestJavaHighmemParams(t *testing.T) {
++	other := blueprint.NewBuiltinPool("other_pool")
++	for _, tc := range []struct {
++		name            string
++		enabled, remote bool
++		input, want     blueprint.Pool
++	}{
++		{"default", false, false, nil, nil},
++		{"opt-in", true, false, nil, javaHighmemPool},
++		{"remote-default", false, true, nil, nil},
++		{"remote-opt-in", true, true, nil, nil},
++		{"existing-pool", true, false, other, other},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			input := blueprint.RuleParams{Command: "original", Pool: tc.input}
++			got := javaHighmemParams(input, tc.enabled, tc.remote)
++			if got.Pool != tc.want || got.Command != input.Command {
++				t.Fatalf("unexpected rule params: %#v", got)
++			}
++			if input.Pool != tc.input {
++				t.Fatal("input mutated")
++			}
++		})
++	}
++}
++
++// Evaluate real module actions as well as the policy function. This catches a
++// compiler rule being accidentally left on the ordinary parallelism path.
++func TestJavaHighmemModuleRules(t *testing.T) {
++	for _, tc := range []struct{ enabled, remote string }{
++		{"", "false"}, {"true", "false"}, {"", "true"}, {"true", "true"},
++	} {
++		enabled := tc.enabled
++		t.Run("enabled="+enabled+"/remote="+tc.remote, func(t *testing.T) {
++			result := android.GroupFixturePreparers(
++				PrepareForTestWithJavaDefaultModules,
++				android.FixtureModifyProductVariables(func(variables android.FixtureProductVariables) {
++					remote := tc.remote == "true"
++					variables.UseRBE = &remote
++					variables.UseREWrapper = &remote
++				}),
++				android.FixtureMergeEnv(map[string]string{"SOONG_JAVA_HIGHMEM_POOL": enabled, "USE_RBE": tc.remote, "USE_REWRAPPER": tc.remote}),
++			).RunTestWithBp(t, `
++                java_library {
++                    name: "foo",
++                    srcs: ["a.java", "b.kt"],
++                    installable: true,
++                }
++            `)
++			var ninja bytes.Buffer
++			if err := result.Context.WriteBuildFile(&ninja, false, "build.ninja"); err != nil {
++				t.Fatal(err)
++			}
++			for _, name := range []string{"javac", "kotlinc", "turbine", "d8"} {
++				block := regexp.MustCompile(`(?m)^rule [^\n ]*\.` + name + `\n(?:[ \t]+[^\n]*\n)*`).FindString(ninja.String())
++				if block == "" {
++					t.Fatalf("missing Ninja rule %s", name)
++				}
++				if got := strings.Contains(block, "pool = highmem_pool"); got != (enabled == "true" && tc.remote == "false") {
++					t.Errorf("%s highmem pool=%v, enabled=%q: %s", name, got, enabled, block)
++				}
++			}
++			params := result.ModuleForTests(t, "foo", "android_common").Rule("lint").RuleParams
++			got := params.Pool != nil && strings.Contains(params.Pool.String(), "highmem_pool")
++			if got != (enabled == "true" && tc.remote == "false") {
++				t.Errorf("lint highmem pool=%v", got)
++			}
++
++		})
++	}
++}
+diff --git a/java/kotlin.go b/java/kotlin.go
+index 8706a0df8..c74bad18c 100644
+--- a/java/kotlin.go
++++ b/java/kotlin.go
+@@ -53,7 +53,7 @@ const nonIncKotlinCmd = `rm -rf "$classesDir" "$headerClassesDir" "$srcJarDir" "
+ 
+ const moveDeltaStateFile = `mv $newStateFile $priorStateFile && rm $sourceDeltaFile`
+ 
+-var kotlinc = pctx.AndroidRemoteStaticRule("kotlinc", android.RemoteRuleSupports{},
++var kotlinc = javaAndroidRemoteStaticRule("kotlinc", android.RemoteRuleSupports{},
+ 	blueprint.RuleParams{
+ 		Command: inputDeltaCmd + ` && ` + nonIncKotlinCmd + ` && ` + moveDeltaStateFile,
+ 		CommandDeps: []string{
+@@ -79,7 +79,7 @@ var kotlinc = pctx.AndroidRemoteStaticRule("kotlinc", android.RemoteRuleSupports
+ 	"classesDir", "headerClassesDir", "headerJar", "kotlinJvmTarget", "kotlinBuildFile", "emptyDir",
+ 	"newStateFile", "priorStateFile", "sourceDeltaFile", "name", "jarArgs", "friendPathsArg")
+ 
+-var kotlinJarSnapshot = pctx.AndroidRemoteStaticRule("kotlin-jar-snapshot", android.RemoteRuleSupports{},
++var kotlinJarSnapshot = javaAndroidRemoteStaticRule("kotlin-jar-snapshot", android.RemoteRuleSupports{},
+ 	blueprint.RuleParams{
+ 		Command: `${config.KotlinJarSnapshotterBinary} -jar="$in"`,
+ 		CommandDeps: []string{
+@@ -89,7 +89,7 @@ var kotlinJarSnapshot = pctx.AndroidRemoteStaticRule("kotlin-jar-snapshot", andr
+ 	},
+ )
+ 
+-var kotlinIncremental = pctx.AndroidRemoteStaticRule("kotlin-incremental", android.RemoteRuleSupports{},
++var kotlinIncremental = javaAndroidRemoteStaticRule("kotlin-incremental", android.RemoteRuleSupports{},
+ 	blueprint.RuleParams{
+ 		Command: // Incremental
+ 
+@@ -146,7 +146,7 @@ var kotlinIncremental = pctx.AndroidRemoteStaticRule("kotlin-incremental", andro
+ 	"classesDir", "headerClassesDir", "headerJar", "kotlinJvmTarget", "kotlinBuildFile", "emptyDir",
+ 	"name", "outputDir", "buildDir", "workDir", "newStateFile", "priorStateFile", "sourceDeltaFile", "jarArgs", "friendPathsArg")
+ 
+-var kotlinKytheExtract = pctx.AndroidStaticRule("kotlinKythe",
++var kotlinKytheExtract = javaStaticRule("kotlinKythe",
+ 	blueprint.RuleParams{
+ 		Command: `rm -rf "$srcJarDir" && mkdir -p "$srcJarDir" && ` +
+ 			`${config.ZipSyncCmd} -d $srcJarDir -l $srcJarDir/list -f "*.java" -f "*.kt" $srcJars && ` +
+@@ -420,7 +420,7 @@ func getAssociateJars(ctx android.ModuleContext, associates []string) android.Pa
+ 	return associateJars
+ }
+ 
+-var kaptStubs = pctx.AndroidRemoteStaticRule("kaptStubs", android.RemoteRuleSupports{},
++var kaptStubs = javaAndroidRemoteStaticRule("kaptStubs", android.RemoteRuleSupports{},
+ 	blueprint.RuleParams{
+ 		Command: `rm -rf "$srcJarDir" "$kotlinBuildFile" "$kaptDir" && ` +
+ 			`mkdir -p "$srcJarDir" "$kaptDir/sources" "$kaptDir/classes" && ` +
+diff --git a/java/lint.go b/java/lint.go
+index e06ad0fe3..80c6ec918 100644
+--- a/java/lint.go
++++ b/java/lint.go
+@@ -438,6 +438,10 @@ func (l *linter) lint(ctx android.ModuleContext) {
+ 			android.PathForModuleOut(ctx, "lint.sbox.textproto")).
+ 		SandboxInputs()
+ 
++	if ctx.Config().IsEnvTrue("SOONG_JAVA_HIGHMEM_POOL") && !ctx.Config().UseRemoteBuild() {
++		rule.HighMem()
++	}
++
+ 	if ctx.Config().UseREWrapper() && ctx.Config().IsEnvTrue("RBE_LINT") {
+ 		pool := ctx.Config().GetenvWithDefault("RBE_LINT_POOL", "java16")
+ 		rule.Remoteable(android.RemoteRuleSupports{RBE: true})
+-- 
+2.43.0

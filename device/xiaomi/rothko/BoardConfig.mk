@@ -53,6 +53,7 @@ TARGET_DYNAMIC_64_32_MEDIASERVER := true
 # receives no Kati goals and needs only configuration/input verification.
 # Empty main.mk and full/OTA invocations retain the complete release gate.
 ROTHKO_MAKE_CONTEXT := build
+ROTHKO_BUILD_PURPOSE ?= release
 ifeq ($(origin MAKECMDGOALS),command line)
   ifneq (,$(DUMP_MANY_VARS))
     ifeq ($(CALLED_FROM_SETUP),true)
@@ -62,7 +63,7 @@ ifeq ($(origin MAKECMDGOALS),command line)
 endif
 # MAKEFILE_LIST is reset during product imports. The helper independently
 # verifies the approved Kati ancestor's actual -f/suffix for cleanspec only.
-ROTHKO_PREFLIGHT_OUT := $(shell python3 $(DEVICE_PATH)/scripts/preflight.py --make --device-root $(DEVICE_PATH) --make-goals '$(MAKECMDGOALS)' --original-goals '$(ORIGINAL_MAKECMDGOALS)' --make-context $(ROTHKO_MAKE_CONTEXT) --makefile-list '$(MAKEFILE_LIST)' --kati-context-report-dir '$(OUT_DIR)/rothko-kati-context' 2>&1 || echo ROTHKO_PREFLIGHT_COMMAND_FAILED)
+ROTHKO_PREFLIGHT_OUT := $(shell python3 $(DEVICE_PATH)/scripts/preflight.py --make --device-root $(DEVICE_PATH) --make-goals '$(MAKECMDGOALS)' --original-goals '$(ORIGINAL_MAKECMDGOALS)' --build-purpose '$(ROTHKO_BUILD_PURPOSE)' --make-context $(ROTHKO_MAKE_CONTEXT) --makefile-list '$(MAKEFILE_LIST)' --kati-context-report-dir '$(OUT_DIR)/rothko-kati-context' 2>&1 || echo ROTHKO_PREFLIGHT_COMMAND_FAILED)
 ifneq (,$(strip $(ROTHKO_PREFLIGHT_OUT)))
 $(error $(ROTHKO_PREFLIGHT_OUT))
 endif

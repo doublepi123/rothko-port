@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lcy <admin@luchenyang.xyz>
+Date: Mon, 16 Nov 2026 07:33:33 +0000
+Subject: [PATCH] target-files: depend on prebuilt init_boot before packaging
+
+The target-files recipe copies INSTALLED_INIT_BOOT_IMAGE_TARGET into
+PREBUILT_IMAGES when BOARD_PREBUILT_INIT_BOOT_IMAGE is set, but its
+prerequisites omit the installed image. A target-files-only build can
+therefore reach packaging before the existing prebuilt copy rule runs.
+
+Depend on the installed image and include it in the container license
+dependencies. This preserves the normal image rule, signing behavior and
+packaging checks, and is a no-op when no init_boot target is defined.
+---
+ core/Makefile | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/core/Makefile b/core/Makefile
+index b8c418940c5d580d87c501e9485389355e6533ba..456df9cd4f6ae24be94a412d5b9d482ef67fadd0 100644
+--- a/core/Makefile
++++ b/core/Makefile
+@@ -6616,6 +6616,7 @@
+ # directories are up-to-date.
+ $(BUILT_TARGET_FILES_DIR): \
+ 	    $(INSTALLED_RADIOIMAGE_TARGET) \
++	    $(INSTALLED_INIT_BOOT_IMAGE_TARGET) \
+ 	    $(INSTALLED_RECOVERYIMAGE_TARGET) \
+ 	    $(INSTALLED_CACHEIMAGE_TARGET) \
+ 	    $(INSTALLED_DTBOIMAGE_TARGET) \
+@@ -7156,6 +7157,7 @@
+ 
+ $(call declare-1p-container,$(BUILT_TARGET_FILES_PACKAGE),)
+ $(call declare-container-license-deps,$(BUILT_TARGET_FILES_PACKAGE), $(INSTALLED_RADIOIMAGE_TARGET) \
++	    $(INSTALLED_INIT_BOOT_IMAGE_TARGET) \
+             $(INSTALLED_RECOVERYIMAGE_TARGET) \
+             $(INSTALLED_CACHEIMAGE_TARGET) \
+             $(INSTALLED_DTBOIMAGE_TARGET) \

@@ -21,6 +21,12 @@ $(call inherit-product, $(ROTHKO_VENDOR_PRODUCT))
 # Inherit common LineageOS configuration.
 $(call inherit-product, vendor/lineage/config/common_full_phone.mk)
 
+# Disposable development certificates are supplied by the build operator.
+# Their use does not alter the independent hardware/release readiness gates.
+ifeq ($(ROTHKO_BUILD_PURPOSE),development)
+PRODUCT_DEFAULT_DEV_CERTIFICATE := vendor/xiaomi/rothko/keys/releasekey
+endif
+
 PRODUCT_BRAND := Redmi
 PRODUCT_DEVICE := rothko
 PRODUCT_MANUFACTURER := Xiaomi
