@@ -19,13 +19,17 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <mutex>
 #include <thread>
 
 #include "UdfpsHandler.h"
+#include "RothkoUdfpsState.h"
+
+#ifndef IMPL_V2
+#error "The rothko handler requires the same Xiaomi V2 device ABI as its service"
+#endif
 
 using ::aidl::android::hardware::biometrics::fingerprint::AcquiredInfo;
 
@@ -101,18 +105,34 @@ bool setTouchFodMode(int32_t mode) {
 class RothkoUdfpsHandler : public UdfpsHandler {
   public:
     void init(fingerprint_device_t* device) {
+        android::base::SetLogger(android::base::LogdLogger(android::base::SYSTEM));
         mDevice = device;
         mDispFd = android::base::unique_fd(open(kDispFeaturePath, O_RDWR | O_CLOEXEC));
         if (mDispFd < 0) PLOG(ERROR) << "open " << kDispFeaturePath;
-        setTouchFodMode(1);
+        stopOperation();
         std::thread([this]() { displayEventLoop(); }).detach();
         std::thread([this]() { fodPressStatusLoop(); }).detach();
     }
 
+    void onOperationStarted() override {
+        std::lock_guard<std::mutex> lock(mMutex);
+        bool pressed = mState.rawPressed();
+        android::base::unique_fd fd(open(kFodPressStatusPath, O_RDONLY | O_CLOEXEC));
+        char value = 0;
+        if (fd >= 0 && pread(fd.get(), &value, 1, 0) == 1) pressed = value == '1';
+        stopOperationLocked();
+        mState.startOperation(pressed);
+        setTouchFodMode(1);
+        LOG(INFO) << "operation started; held touch=" << pressed;
+        // A real contact may have woken Keyguard before authentication started.
+        // Only the active operation may replay it to the legacy HAL.
+        if (pressed) fingerDownLocked(0, 0);
+    }
+
     void onFingerDown(uint32_t x, uint32_t y, float, float) {
-        if (mAuthSuccess) return;
-        LOG(INFO) << __func__ << " x=" << x << " y=" << y;
-        fingerDown(x, y);
+        LOG(INFO) << __func__;
+        std::lock_guard<std::mutex> lock(mMutex);
+        fingerDownLocked(x, y);
     }
 
     void onFingerUp() {
@@ -142,12 +162,7 @@ class RothkoUdfpsHandler : public UdfpsHandler {
 
     void onAuthenticationSucceeded() {
         LOG(INFO) << __func__;
-        mAuthSuccess = true;
-        fingerUp();
-        std::thread([this]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            mAuthSuccess = false;
-        }).detach();
+        stopOperation();
     }
 
     void onAuthenticationFailed() {
@@ -157,7 +172,7 @@ class RothkoUdfpsHandler : public UdfpsHandler {
 
     void cancel() {
         LOG(INFO) << __func__;
-        fingerUp();
+        stopOperation();
     }
 
   private:
@@ -175,10 +190,8 @@ class RothkoUdfpsHandler : public UdfpsHandler {
         }
     }
 
-    void fingerDown(uint32_t x, uint32_t y) {
-        std::lock_guard<std::mutex> lock(mMutex);
-        if (mFingerDown) return;
-        mFingerDown = true;
+    void fingerDownLocked(uint32_t x, uint32_t y) {
+        if (!mState.beginContact()) return;
         extCmd(kCmdFodPressX, 0);
         extCmd(kCmdFodPressY, 0);
         setLocalHbm(kLocalHbmOn);
@@ -191,12 +204,35 @@ class RothkoUdfpsHandler : public UdfpsHandler {
 
     void fingerUp() {
         std::lock_guard<std::mutex> lock(mMutex);
-        if (!mFingerDown) return;
-        mFingerDown = false;
+        fingerUpLocked();
+    }
+
+    void fingerUpLocked() {
+        const bool wasDown = mState.endContact();
+        // The panel's display event ends NIT capture. Acquired and pointer UP
+        // can arrive before that event; preserve the established HAL timing.
+        if (!wasDown) return;
         setLocalHbm(kLocalHbmOff);
         extCmd(kCmdFodPressStatus, 0);
         extCmd(kCmdFodPressX, 0);
         extCmd(kCmdFodPressY, 0);
+    }
+
+    void stopOperation() {
+        std::lock_guard<std::mutex> lock(mMutex);
+        stopOperationLocked();
+    }
+
+    void stopOperationLocked() {
+        const bool wasCapturing = mState.capturing();
+        mState.stopOperation();
+        setTouchFodMode(0);
+        setLocalHbm(kLocalHbmOff);
+        extCmd(kCmdFodPressStatus, 0);
+        extCmd(kCmdFodPressX, 0);
+        extCmd(kCmdFodPressY, 0);
+        if (wasCapturing) extCmd(kCmdNit, kNitOff);
+        LOG(INFO) << "operation stopped";
     }
 
     void displayEventLoop() {
@@ -213,7 +249,6 @@ class RothkoUdfpsHandler : public UdfpsHandler {
         }
         struct pollfd pfd = {.fd = fd.get(), .events = POLLIN | POLLPRI | POLLRDNORM};
         uint8_t buf[1024];
-        bool capturing = false;
         while (true) {
             int rc = poll(&pfd, 1, -1);
             if (rc < 0) {
@@ -235,12 +270,9 @@ class RothkoUdfpsHandler : public UdfpsHandler {
                 bool start = value != 0 && ((value & 3) == 3 || (value & 8) != 0);
                 bool low = (value & 4) != 0;
                 LOG(INFO) << "display event value=0x" << std::hex << value;
-                if (start && !capturing) {
-                    capturing = true;
-                    extCmd(kCmdNit, low ? kNit110 : kNit1000);
-                } else if (!start && capturing) {
-                    capturing = false;
-                    extCmd(kCmdNit, kNitOff);
+                std::lock_guard<std::mutex> lock(mMutex);
+                if (mState.updateCapture(start)) {
+                    extCmd(kCmdNit, mState.capturing() ? (low ? kNit110 : kNit1000) : kNitOff);
                 }
             }
         }
@@ -254,16 +286,18 @@ class RothkoUdfpsHandler : public UdfpsHandler {
         }
         struct pollfd pfd = {.fd = fd.get(), .events = POLLERR | POLLPRI};
         while (true) {
-            char c = 0;
-            if (pread(fd.get(), &c, 1, 0) == 1) {
-                bool pressed = c == '1';
-                if (pressed != mLastPress) {
-                    mLastPress = pressed;
-                    LOG(INFO) << "fod_press_status=" << c;
-                    if (pressed) {
-                        if (!mAuthSuccess) fingerDown(0, 0);
-                    } else {
-                        fingerUp();
+            {
+                std::lock_guard<std::mutex> lock(mMutex);
+                char c = 0;
+                if (pread(fd.get(), &c, 1, 0) == 1) {
+                    const bool pressed = c == '1';
+                    if (mState.rawPressChanged(pressed)) {
+                        LOG(INFO) << "fod_press_status=" << c;
+                        if (pressed) {
+                            fingerDownLocked(0, 0);
+                        } else {
+                            fingerUpLocked();
+                        }
                     }
                 }
             }
@@ -277,9 +311,7 @@ class RothkoUdfpsHandler : public UdfpsHandler {
     fingerprint_device_t* mDevice = nullptr;
     android::base::unique_fd mDispFd;
     std::mutex mMutex;
-    bool mFingerDown = false;
-    bool mLastPress = false;
-    std::atomic<bool> mAuthSuccess = false;
+    RothkoUdfpsState mState;
 };
 
 static UdfpsHandler* create() {

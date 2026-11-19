@@ -1,8 +1,16 @@
 // SPDX-FileCopyrightText: The LineageOS Project
 // SPDX-License-Identifier: Apache-2.0
 
+// The service and its separately compiled handler dereference the same legacy
+// device table. V1 extCmd occupies V2's authenticate slot; never mix the ABIs.
+cc_defaults {
+    name: "rothko_fingerprint_hal_v2_defaults",
+    cppflags: ["-DIMPL_V2"],
+}
+
 cc_defaults {
     name: "rothko_udfpshandler_defaults",
+    defaults: ["rothko_fingerprint_hal_v2_defaults"],
     vendor: true,
     srcs: ["RothkoUdfpsHandler.cpp"],
     header_libs: ["//hardware/xiaomi:xiaomifingerprint_headers"],
@@ -36,12 +44,12 @@ cc_library_static {
 // previous HAL, and replaces /vendor/bin/hw/mfp-daemon in place.
 cc_binary {
     name: "android.hardware.biometrics.fingerprint-service.rothko-prebuilt-vendor",
+    defaults: ["rothko_fingerprint_hal_v2_defaults"],
     vendor: true,
     relative_install_path: "hw",
     compile_multilib: "64",
     srcs: ["//hardware/xiaomi:android.hardware.biometrics.fingerprint-service.xiaomi-srcs"],
     cppflags: [
-        "-DIMPL_V2",
         "-DXIAOMI_FINGERPRINT_DEFAULT_TYPE=\"udfps_optical\"",
         "-DXIAOMI_FINGERPRINT_DEFAULT_SENSOR_ID=\"5\"",
         "-DXIAOMI_FINGERPRINT_DEFAULT_SENSOR_LOCATION=\"610|2444|105\"",
