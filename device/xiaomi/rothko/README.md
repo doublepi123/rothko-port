@@ -30,9 +30,27 @@ the old FOD implementation.
 `hardware/xiaomi` AIDL service. A second target,
 `android.hardware.biometrics.fingerprint-service.rothko-prebuilt-vendor`,
 links the handler statically for replacing the original daemon inside a
-prebuilt vendor image. Both targets have compiled; the latter formal target
-has not itself been flashed. The phone ran the earlier spike02 build of the
-same migration approach.
+prebuilt vendor image. The formal target was deployed on 2026-11-16. The first
+operation-gated trial regressed unlocking; a protocol-timing correction was
+flashed and read back but failed physical acceptance. On 2026-11-17 compiler
+probes proved that the static handler used V1 while the service used V2:
+the handler's extCmd offset selected V2's authenticate entry. Both now inherit
+one V2 build default, and the handler rejects V1 compilation. The corrected
+executable was flashed, read back and independently accepted by the user for
+both screen-on and screen-off unlocking on 2026-11-17.
+
+The handler now enables touch FOD only during authentication or enrollment.
+Idle touches and late display events cannot enable local HBM. Cancellation,
+success, errors, session close, lockout and completed enrollment stop the
+operation; failed authentication can retry within its existing request. A real
+touch held while Keyguard starts authentication can begin contact once the
+operation is active. Display events control NIT capture independently of
+pointer/acquired ordering; acquired callbacks do not force NIT off early. Apply
+all three `hardware/xiaomi` patches and rebuild the service and handler
+together because their internal interface gains the operation-start hook.
+Host state tests use `python3 tools/check-udfps-state.py` from the port root.
+The V2-corrected build passed the user's unlocking trial. Idle-touch illumination
+and a user-initiated call still require separate acceptance for this build.
 
 `fingerprint.mk` lists packages and properties for a source-built vendor.
 Before enabling it, resolve the original service/VINTF declarations,

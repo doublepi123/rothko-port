@@ -28,7 +28,7 @@ LineageOS 官方设备或可直接刷入的发行版。
 rothko-port/
 ├── device/xiaomi/rothko/            # 设备树、指纹 handler、显示 RRO
 ├── vendor/xiaomi/rothko/            # 厂商输入清单和脚本，无镜像
-├── patches/                        # 8 个上游项目的活动补丁
+├── patches/                        # 11 个上游项目的活动补丁
 ├── archive/legacy-fod/              # 旧 FOD 补丁，入口脚本不应用
 ├── docs/                           # 构建边界、验证和准入差距
 └── tools/                          # 源码接入、补丁应用、主机镜像工具
@@ -55,8 +55,11 @@ bash tools/install-source.sh /absolute/path/to/android
 指纹图标、振动、通话、相机，以及重录 Voice Match 后的亮屏/息屏
 Hey Google。详细证据级别见 [验证记录](docs/VALIDATION.md)。
 
-截至记录时，测试设备的指纹二进制是 `spike02`，不是后来整理编译的正式模块；
-二者不能混称同一个已刷产物。当前 services/SystemUI 没有旧 FOD
+上述指纹验收属于先前的 `spike02`。2026-11-16 已部署正式模块，首次请求门控
+实现出现用户报告的解锁回归；后续时序修正仍未通过手机实测。2026-11-17 已
+定位静态 handler 的 V1/V2 接口错配，统一接口后的新产物已刷入并通过运行
+核验；用户已明确确认该版本亮屏、熄屏均能解锁。空闲误触和通话仍待本轮
+确认。当前 services/SystemUI 没有旧 FOD
 桥接实现，但保留锁屏几何调整和少量不被调用的常量/默认关闭资源，
 所以也不能称为完全未修改的 Lineage 框架。
 

@@ -36,6 +36,14 @@ jobs:
         run: uv run --no-project tools/check-source.py
       - name: Exercise installer
         run: bash tools/check-install.sh
+      - name: Exercise development and release admission
+        run: python3 tools/check-build-contract.py
+      - name: Exercise UDFPS operation boundaries
+        run: python3 tools/check-udfps-state.py
+      - name: Exercise offline Git LFS inputs
+        run: python3 -B -m unittest discover -s tests -p test_source_lfs.py -v
+      - name: Exercise OTA image plan consistency
+        run: python3 -B -m unittest discover -s tests -p test_partition_plan.py -v
       - name: Define patch matrix
         id: matrix
         run: echo "value=$(uv run --no-project tools/check-source.py --matrix)" >> "$GITHUB_OUTPUT"

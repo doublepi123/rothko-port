@@ -22,9 +22,10 @@ bash tools/install-source.sh /absolute/path/to/android
 ## 上游与补丁
 
 1. 同步 Lineage 23.2 的源码。不能只追踪浮动分支就声称可复现：
-   八个改动仓库必须位于 `patches/BASES.tsv` 指定的基线。
-   本包未冻结全部 1,164 个 repo 项目，这是整机复现的剩余缺口。
-2. `hardware/xiaomi` 需另外拉取到同名路径，因为原始工作区未同步它。
+   `patches/BASES.tsv` 列出的十一个改动仓库必须位于指定基线。
+   [固定清单](../tools/manifests/platform.xml) 冻结 1,165 个项目，包含补充的
+   `hardware/xiaomi`，其余项目沿用既有 Lineage/AOSP 同步基线。
+2. 可用 [本地缓存准备流程](CLEAN-BUILD.md) 建立独立检出，避免重拉源码。
 3. 在每个项目的**干净独立分支**上 checkout 对应基线。
 4. 设置自己的 Git committer 身份后执行：
 
@@ -32,13 +33,13 @@ bash tools/install-source.sh /absolute/path/to/android
 bash tools/apply-patches.sh /absolute/path/to/android
 ```
 
-入口会先检查全部八个仓库的基线、干净状态、committer 身份和补丁能否
+入口会先检查全部十一个仓库的基线、干净状态、committer 身份和补丁能否
 应用，再逐仓库 `git am`。基线不符、脏目录或重复应用会在第一次提交前
 拒绝；它不会自动 reset 或 stash 用户内容。应用中遭遇磁盘错误等情况
 并不构成跨仓库原子事务，需按输出定位 `git am` 状态后人工处理。
 
 原多仓库 `local_manifest` 模板已移到 `archive/multi-repo-manifest.xml`，
-因为这里没有发布八个独立 fork。当前流程是单仓库接入加补丁应用，
+因为这里没有发布独立的上游 fork。当前流程是单仓库接入加补丁应用，
 不要把归档模板复制进 `.repo/local_manifests`。
 
 ## 当前可构建目标

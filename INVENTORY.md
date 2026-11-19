@@ -19,16 +19,19 @@ NOTICE 和历史保留在原本地工作区，不是当前运行方案或构建�
 
 | 项目 | 补丁数 | 当前内容 |
 | --- | ---: | --- |
-| frameworks/base | 1 | 锁屏几何和诊断；保留已验收构建中的惰性常量/默认关闭资源，无旧 FOD 会话或触摸实现 |
+| frameworks/base | 3 | 锁屏几何和诊断；独立 UI 避让；可按设备选择充电进度估算；无旧 FOD 会话或触摸实现 |
 | frameworks/native | 1 | vibratorfeature 实例回退、BLAST 初始化竞态修复 |
 | packages/apps/Settings | 1 | 指纹录入界面调整 |
+| packages/apps/StorageManager | 1 | 清理页根布局消费窗口边距，避免列表被标题栏遮挡 |
 | packages/apps/CarrierConfig | 1 | 语音能力快照及受权限约束的 dump |
 | bootable/recovery | 1 | 当前恢复环境的正常退出桥接与加载约束 |
 | system/sepolicy | 4 | CIL 合并、zygote 原型开关、受检查的兼容调整 |
 | external/perfetto | 1 | 唤醒锁追踪不阻塞 |
-| hardware/xiaomi | 2 | 无变体后缀的旧 HAL 加载；预编译 vendor 的静态 handler/配置桥接 |
+| hardware/xiaomi | 3 | 无变体后缀的旧 HAL 加载；预编译 vendor 的静态 handler/配置桥接；指纹请求开始与结束时的高亮门控 |
+| build/soong | 2 | 传递经过校验的 GOMEMLIMIT；可选本地 JVM 高内存任务池 |
+| build/make | 1 | target-files 显式依赖预编译 init_boot 的安装目标及许可元数据 |
 
-共 8 个项目、12 个补丁。`tools/apply-patches.sh` 只读取这个活动索引。
+共 11 个项目、19 个补丁。`tools/apply-patches.sh` 只读取这个活动索引。
 上游已合并与否、是否适合官方准入需要分别评审，不能据此视为获上游认可。
 
 ## 已归档内容
@@ -36,8 +39,8 @@ NOTICE 和历史保留在原本地工作区，不是当前运行方案或构建�
 [archive/legacy-fod](archive/legacy-fod/README.md) 保存完整旧
 frameworks/base FOD 补丁。`archive/multi-repo-manifest.xml` 是旧多仓库
 发布方案的清单模板，不用于当前构建。不重写原分支，不删除原源码工作区，
-不自动应用归档补丁。`build/soong` 和 `build/blueprint` 的本机构建
-调优也不在活动索引中。
+不自动应用归档补丁。`build/soong` 加入经过验证的 Go 堆预算传递和可选 JVM 并发限制补丁；
+其他本地 Soong/Blueprint 调优不在活动索引中。
 
 ## 不包含的输入
 
