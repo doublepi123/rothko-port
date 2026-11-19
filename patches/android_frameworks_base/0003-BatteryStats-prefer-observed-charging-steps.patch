@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Rothko Device Maintainers <noreply@rothko.invalid>
+Date: Wed, 18 Nov 2026 01:30:00 +0000
+Subject: [PATCH] BatteryStats: allow devices to prefer observed charging steps
+
+The rothko health input returns zero time to full during real charging below
+100%, preventing the existing level-step estimator from running. Allow a
+readonly device configuration to prefer that estimator. Without observed
+steps the result stays unknown; a full battery returns zero. Other devices
+retain the existing health-first behavior by default. No statistics reset or
+charging control is involved.
+
+diff --git a/services/core/java/com/android/server/power/stats/BatteryStatsImpl.java b/services/core/java/com/android/server/power/stats/BatteryStatsImpl.java
+--- a/services/core/java/com/android/server/power/stats/BatteryStatsImpl.java
++++ b/services/core/java/com/android/server/power/stats/BatteryStatsImpl.java
+@@ -67,6 +67,7 @@
+ import android.os.RemoteException;
+ import android.os.ServiceManager;
+ import android.os.SystemClock;
++import android.os.SystemProperties;
+ import android.os.UserHandle;
+ import android.os.WakeLockStats;
+ import android.os.WorkSource;
+@@ -1798,6 +1799,11 @@
+     private int mMaxLearnedBatteryCapacityUah = -1;
+ 
+     private long mBatteryTimeToFullSeconds = -1;
++    // Some health implementations report unsupported or unreliable time-to-full values.
++    // Devices may opt into the existing estimate based on observed charge-level steps.
++    private final boolean mPreferChargeStepEstimate = SystemProperties.getBoolean(
++            "ro.config.prefer_charge_step_estimate", false);
++
+ 
+     private long[] mTmpCpuTimeInFreq;
+ 
+@@ -14001,7 +14007,10 @@
+             // Not yet working.
+             return -1;
+         }
+-        if (mBatteryTimeToFullSeconds >= 0) {
++        if (mPreferChargeStepEstimate && mBatteryLevel >= 100) {
++            return 0;
++        }
++        if (!mPreferChargeStepEstimate && mBatteryTimeToFullSeconds >= 0) {
+             return mBatteryTimeToFullSeconds * (1000 * 1000); // s to us
+         }
+         // Else use algorithmic approach

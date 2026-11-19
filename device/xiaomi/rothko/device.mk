@@ -15,6 +15,11 @@ include device/xiaomi/rothko/config/product-parameters.mk
 # matching snapshot instead of substituting current-platform library ABIs.
 PRODUCT_EXTRA_VNDK_VERSIONS += 34
 
+# The stock health estimate is zero/unreliable below full charge. Use Android's
+# observed charging progress for time-to-full; retain all charging controls.
+PRODUCT_SYSTEM_PROPERTIES += ro.config.prefer_charge_step_estimate=true
+
+
 # Partial, evidence-frozen compatibility matrix fragment (174 observed HAL
 # instances in 93 HAL groups). It is an exact static candidate, not complete
 # device compatibility, and actual runtime registration is unverified. The
