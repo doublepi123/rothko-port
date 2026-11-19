@@ -1,0 +1,35 @@
+From 787d3fb93df0ffc2173bfc36f6bb63d5705d43b4 Mon Sep 17 00:00:00 2001
+From: lcy <admin@luchenyang.xyz>
+Date: Mon, 16 Nov 2026 01:45:11 +0800
+Subject: [PATCH] StorageManager: fit deletion helper content around system
+ decor
+
+The API 36 activity draws edge to edge, but its root layout never consumes the insets forwarded by the native action bar. The first list item is laid out under the title bar and the bottom controls can extend into system decorations.
+
+Fit the shared root layout to the dispatched system window insets so the list, empty state and button bar use the available content area without changing platform-wide window behavior.
+---
+ res/layout/settings_main_prefs.xml | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/res/layout/settings_main_prefs.xml b/res/layout/settings_main_prefs.xml
+index 430d409..629633a 100644
+--- a/res/layout/settings_main_prefs.xml
++++ b/res/layout/settings_main_prefs.xml
+@@ -16,6 +16,7 @@
+ 
+ <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+     android:orientation="vertical"
++    android:fitsSystemWindows="true"
+     android:layout_height="match_parent"
+     android:layout_width="match_parent">
+ 
+@@ -68,4 +69,4 @@
+         </LinearLayout>
+ 
+     </RelativeLayout>
+-</LinearLayout>
+\ No newline at end of file
++</LinearLayout>
+-- 
+2.53.0
+
