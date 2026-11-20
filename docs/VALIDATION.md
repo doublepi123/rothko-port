@@ -1,7 +1,22 @@
 # 验证记录与证据边界
 
-记录日期：2026-11-18。均为一台中国版 Redmi K70 至尊版，不能据此
+记录日期：2026-11-20。均为一台中国版 Redmi K70 至尊版，不能据此
 推导国际版 Xiaomi 14T Pro 或全部面板/指纹器件版本均兼容。
+
+## 2026-11-20 热点共享 VPN 的 BPF 过滤器
+
+热点选择 v2rayNG 的 `tun0` 为上游时，该接口缺少 `clsact`，热点服务挂载 IPv4 和
+IPv6 接收方向过滤器均返回 `EINVAL`。netd 补丁在注册 `VpnService` 接口时创建
+`clsact`，接口上已有的过滤器会保留。
+
+ARM64 `netd` 随 `system_a` 和 `vbmeta_system_a` 刷入，17 个分区回读通过。
+启动链摘要为 `21144028493372db4cfbeb17009183c6155c9cf997034f5b76d2292f41abd293`。
+设备以 `user`、SELinux Enforcing 启动，连续 153 秒运行核验通过。
+
+解锁并开启热点和 v2rayNG 后，`ap0` 选中 `tun0`，BPF 加速已开启。
+`tc qdisc show dev tun0` 显示 `clsact`，`tc filter show dev tun0 ingress`
+同时列出 `tether_downstream4_rawip` 和 `tether_downstream6_rawip` 两个
+`direct-action` 过滤器。本轮连接没有新增 `EINVAL` 挂载错误。
 
 ## 最近一次用户已验收组合（升级前）
 

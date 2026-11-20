@@ -28,7 +28,7 @@ LineageOS 官方设备或可直接刷入的发行版。
 rothko-port/
 ├── device/xiaomi/rothko/            # 设备树、指纹 handler、显示 RRO
 ├── vendor/xiaomi/rothko/            # 厂商输入清单和脚本，无镜像
-├── patches/                        # 11 个上游项目的活动补丁
+├── patches/                        # 12 个上游项目的活动补丁
 ├── archive/legacy-fod/              # 旧 FOD 补丁，入口脚本不应用
 ├── docs/                           # 构建边界、验证和准入差距
 └── tools/                          # 源码接入、补丁应用、主机镜像工具

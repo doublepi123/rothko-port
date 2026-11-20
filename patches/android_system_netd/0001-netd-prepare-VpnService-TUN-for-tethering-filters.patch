@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Rothko Device Maintainers <noreply@rothko.invalid>
+Date: Fri, 20 Nov 2026 10:00:00 +0800
+Subject: [PATCH] netd: prepare VpnService TUN for tethering filters
+
+Create clsact when netd registers an app VPN interface so that tethering can
+attach its downstream filters when the VPN is selected as upstream. Use
+exclusive creation to preserve existing filters across VPN handover.
+
+diff --git a/server/NetworkController.cpp b/server/NetworkController.cpp
+index 90109ed..3dd25fe 100644
+--- a/server/NetworkController.cpp
++++ b/server/NetworkController.cpp
+@@ -478,7 +478,8 @@ int NetworkController::createVirtualNetwork(unsigned netId, bool secure, NativeV
+     if (int ret = modifyFallthroughLocked(netId, true)) {
+         return ret;
+     }
+-    mNetworks[netId] = new VirtualNetwork(netId, secure, excludeLocalRoutes);
++    mNetworks[netId] = new VirtualNetwork(netId, secure, excludeLocalRoutes,
++                                          vpnType == NativeVpnType::SERVICE);
+     return 0;
+ }
+ 
+diff --git a/server/VirtualNetwork.cpp b/server/VirtualNetwork.cpp
+index e0f6040..ee276f8 100644
+--- a/server/VirtualNetwork.cpp
++++ b/server/VirtualNetwork.cpp
+@@ -14,6 +14,9 @@
+  * limitations under the License.
+  */
+ 
++#include <net/if.h>
++#include <string.h>
++
+ #include <set>
+ 
+ #define LOG_TAG "Netd"
+@@ -21,14 +24,18 @@
+ #include "VirtualNetwork.h"
+ 
+ #include "RouteController.h"
++#include "TcUtils.h"
+ 
+ #include "log/log.h"
+ 
+ namespace android {
+ namespace net {
+ 
+-VirtualNetwork::VirtualNetwork(unsigned netId, bool secure, bool excludeLocalRoutes)
+-    : Network(netId, secure), mExcludeLocalRoutes(excludeLocalRoutes) {}
++VirtualNetwork::VirtualNetwork(unsigned netId, bool secure, bool excludeLocalRoutes,
++                               bool isVpnService)
++    : Network(netId, secure),
++      mExcludeLocalRoutes(excludeLocalRoutes),
++      mIsVpnService(isVpnService) {}
+ 
+ VirtualNetwork::~VirtualNetwork() {}
+ 
+@@ -75,6 +82,17 @@ int VirtualNetwork::addInterface(const std::string& interface) {
+         ALOGE("failed to add interface %s to VPN netId %u", interface.c_str(), mNetId);
+         return ret;
+     }
++    if (mIsVpnService) {
++        // Tethering attaches ingress filters when this TUN becomes its upstream.
++        // The qdisc belongs to the interface and disappears when the TUN is destroyed.
++        const unsigned index = if_nametoindex(interface.c_str());
++        if (index) {
++            const int ret = tcQdiscAddDevClsact(index);
++            if (ret && ret != -EEXIST) {
++                ALOGE("Cannot add clsact to VPN interface %s: %s", interface.c_str(), strerror(-ret));
++            }
++        }
++    }
+     mInterfaces.insert(interface);
+     return 0;
+ }
+diff --git a/server/VirtualNetwork.h b/server/VirtualNetwork.h
+index 6e9bdad..ee74488 100644
+--- a/server/VirtualNetwork.h
++++ b/server/VirtualNetwork.h
+@@ -33,7 +33,8 @@ namespace android::net {
+ // addresses considered to be on the local link.
+ class VirtualNetwork : public Network {
+ public:
+-  explicit VirtualNetwork(unsigned netId, bool secure, bool excludeLocalRoutes = false);
++  explicit VirtualNetwork(unsigned netId, bool secure, bool excludeLocalRoutes = false,
++                          bool isVpnService = false);
+   virtual ~VirtualNetwork();
+   Permission getPermission() const { return PERMISSION_SYSTEM; };
+   [[nodiscard]] int addUsers(const UidRanges& uidRanges, int32_t subPriority) override;
+@@ -48,6 +49,7 @@ private:
+   bool isValidSubPriority(int32_t priority) override;
+   // Whether the local traffic will be excluded from the VPN network.
+   [[maybe_unused]] const bool mExcludeLocalRoutes;
++  const bool mIsVpnService;
+ };
+ 
+ }  // namespace android::net

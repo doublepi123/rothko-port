@@ -28,10 +28,11 @@ NOTICE 和历史保留在原本地工作区，不是当前运行方案或构建�
 | system/sepolicy | 4 | CIL 合并、zygote 原型开关、受检查的兼容调整 |
 | external/perfetto | 1 | 唤醒锁追踪不阻塞 |
 | hardware/xiaomi | 3 | 无变体后缀的旧 HAL 加载；预编译 vendor 的静态 handler/配置桥接；指纹请求开始与结束时的高亮门控 |
+| system/netd | 1 | 为 VpnService 隧道创建热点 BPF 过滤器使用的 clsact 队列 |
 | build/soong | 2 | 传递经过校验的 GOMEMLIMIT；可选本地 JVM 高内存任务池 |
 | build/make | 1 | target-files 显式依赖预编译 init_boot 的安装目标及许可元数据 |
 
-共 11 个项目、19 个补丁。`tools/apply-patches.sh` 只读取这个活动索引。
+共 12 个项目、20 个补丁。`tools/apply-patches.sh` 只读取这个活动索引。
 上游已合并与否、是否适合官方准入需要分别评审，不能据此视为获上游认可。
 
 ## 已归档内容
