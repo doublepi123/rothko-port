@@ -61,5 +61,8 @@ PRODUCT_PACKAGES += \
     RothkoStatusBarFrameworkOverlay \
     RothkoStatusBarSystemUIOverlay
 
+# Fit optical fingerprint enrollment above the navigation bar on Rothko.
+PRODUCT_PACKAGES += RothkoSettingsUdfpsOverlay
+
 # Limited same-firmware unconditional-positive voice profiles only; no global/NR override.
 PRODUCT_PACKAGES += RothkoCarrierVoiceCapabilityOverlay

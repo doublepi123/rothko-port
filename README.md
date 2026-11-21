@@ -1,8 +1,6 @@
 # Redmi K70 Ultra / rothko — source preparation
 
-这里整理中国版 Redmi K70 至尊版（2407FRK8EC、MT6989）的 LineageOS
-23.2 / Android 16 移植。这是**实验性开源移植项目**，不是
-LineageOS 官方设备或可直接刷入的发行版。
+此分支记录国行 Redmi K70 至尊版（2407FRK8EC、MT6989）的 PixelOS 17 实验性移植。构建入口、镜像集成步骤和实测范围见 [PixelOS 17 移植记录](docs/PIXEL-OS-17.md)。Android 16 开发及历史验收记录见 [main 分支](https://github.com/doublepi123/rothko-port/tree/main)。
 
 项目地址：https://github.com/doublepi123/rothko-port
 

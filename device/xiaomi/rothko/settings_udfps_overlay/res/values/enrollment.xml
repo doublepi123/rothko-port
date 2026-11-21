@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <bool name="config_useLegacyUdfpsUi">true</bool>
+    <!-- Extra pixel padding around Rothko optical sensor in Settings enrollment. -->
+    <integer name="config_udfpsEnrollProgressBar">64</integer>
+</resources>

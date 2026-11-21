@@ -26,7 +26,7 @@ def classify(argv, executable, cwd, root):
     result["resolved_entrypoint"] = str(path.resolve())
     result["approved_cleanspec"] = (
         path.resolve() == root / "build/make/core/cleanbuild.mk"
-        and bool(re.fullmatch(r"-lineage_rothko(?:-[A-Za-z0-9_-]+)?-cleanspec", suffix[0]))
+        and bool(re.fullmatch(r"-(?:lineage|custom)_rothko(?:-[A-Za-z0-9_-]+)?-cleanspec", suffix[0]))
         and not any(token.startswith("--file") or (token.startswith("-f") and token != "-f") for token in argv[1:])
     )
     return result

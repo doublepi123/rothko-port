@@ -1,0 +1,281 @@
+From: lcy <admin@luchenyang.xyz>
+Subject: [PATCH] fingerprint: Support Rothko prebuilt vendor and optical illumination
+
+Keep this patch on the Android 17 baseline recorded in patches/BASES.tsv.
+
+---
+
+diff --git a/aidl/fingerprint/Android.bp b/aidl/fingerprint/Android.bp
+index 96ca610..5a78369 100644
+--- a/aidl/fingerprint/Android.bp
++++ b/aidl/fingerprint/Android.bp
+@@ -5,12 +5,8 @@
+ // SPDX-License-Identifier: Apache-2.0
+ //
+ 
+-cc_binary {
+-    name: "android.hardware.biometrics.fingerprint-service.xiaomi",
+-    defaults: ["xiaomi_hardware_biometrics_config_default"],
+-    relative_install_path: "hw",
+-    init_rc: ["android.hardware.biometrics.fingerprint-service.xiaomi.rc"],
+-    vintf_fragments: ["android.hardware.biometrics.fingerprint-service.xiaomi.xml"],
++filegroup {
++    name: "android.hardware.biometrics.fingerprint-service.xiaomi-srcs",
+     srcs: [
+         "CancellationSignal.cpp",
+         "Fingerprint.cpp",
+@@ -19,6 +15,24 @@ cc_binary {
+         "Session.cpp",
+         "service.cpp",
+     ],
++}
++
++cc_library_headers {
++    name: "android.hardware.biometrics.fingerprint-service.xiaomi-headers",
++    export_include_dirs: [
++        ".",
++        "include",
++    ],
++    vendor: true,
++}
++
++cc_binary {
++    name: "android.hardware.biometrics.fingerprint-service.xiaomi",
++    defaults: ["xiaomi_hardware_biometrics_config_default"],
++    relative_install_path: "hw",
++    init_rc: ["android.hardware.biometrics.fingerprint-service.xiaomi.rc"],
++    vintf_fragments: ["android.hardware.biometrics.fingerprint-service.xiaomi.xml"],
++    srcs: [":android.hardware.biometrics.fingerprint-service.xiaomi-srcs"],
+     local_include_dirs: [
+         "include",
+     ],
+diff --git a/aidl/fingerprint/Fingerprint.cpp b/aidl/fingerprint/Fingerprint.cpp
+index cf98a29..f699495 100644
+--- a/aidl/fingerprint/Fingerprint.cpp
++++ b/aidl/fingerprint/Fingerprint.cpp
+@@ -7,6 +7,8 @@
+ 
+ #include "Fingerprint.h"
+ 
++#include <dlfcn.h>
++
+ #include <android-base/properties.h>
+ #include <fingerprint.sysprop.h>
+ #include "util/Util.h"
+@@ -136,8 +138,26 @@ fingerprint_device_t* Fingerprint::openFingerprintHal(const char* class_name,
+ 
+     ALOGD("Opening fingerprint hal library...");
+     if (hw_get_module_by_class(module_id, class_name, &hw_mdl) != 0) {
+-        ALOGE("Can't open fingerprint HW Module");
+-        return nullptr;
++        // Some stock blobs ship <module_id>.<class>.so without a variant
++        // suffix, which hw_get_module_by_class never probes.
++        for (const char* dir : {"/odm/lib64/hw", "/vendor/lib64/hw"}) {
++            std::string path = std::string(dir) + "/" + module_id + "." + class_name + ".so";
++            void* handle = dlopen(path.c_str(), RTLD_NOW);
++            if (!handle) continue;
++            auto hmi = static_cast<hw_module_t*>(dlsym(handle, HAL_MODULE_INFO_SYM_AS_STR));
++            if (!hmi) {
++                dlclose(handle);
++                continue;
++            }
++            hmi->dso = handle;
++            hw_mdl = hmi;
++            ALOGI("Loaded fingerprint HAL directly from %s", path.c_str());
++            break;
++        }
++        if (!hw_mdl) {
++            ALOGE("Can't open fingerprint HW Module");
++            return nullptr;
++        }
+     }
+ 
+     if (!hw_mdl) {
+diff --git a/aidl/fingerprint/FingerprintConfig.cpp b/aidl/fingerprint/FingerprintConfig.cpp
+index 77edc8b..8c9c716 100644
+--- a/aidl/fingerprint/FingerprintConfig.cpp
++++ b/aidl/fingerprint/FingerprintConfig.cpp
+@@ -15,6 +15,18 @@
+ 
+ using namespace ::android::fingerprint::xiaomi;
+ 
++// Builds for prebuilt vendor images cannot ship vendor properties; they may
++// compile the sensor defaults in instead.
++#ifndef XIAOMI_FINGERPRINT_DEFAULT_TYPE
++#define XIAOMI_FINGERPRINT_DEFAULT_TYPE ""
++#endif
++#ifndef XIAOMI_FINGERPRINT_DEFAULT_SENSOR_ID
++#define XIAOMI_FINGERPRINT_DEFAULT_SENSOR_ID "0"
++#endif
++#ifndef XIAOMI_FINGERPRINT_DEFAULT_SENSOR_LOCATION
++#define XIAOMI_FINGERPRINT_DEFAULT_SENSOR_LOCATION ""
++#endif
++
+ namespace aidl::android::hardware::biometrics::fingerprint {
+ 
+ // Wrapper to system property access functions
+@@ -38,9 +50,9 @@ CREATE_GETTER_SETTER_WRAPPER(control_illumination, OptBool)
+ // Name, Getter, Setter, Parser and default value
+ #define NGS(_NAME_) #_NAME_, _NAME_##Getter, _NAME_##Setter
+ static Config::Data configData[] = {
+-        {NGS(type), &Config::parseString, ""},
+-        {NGS(sensor_id), &Config::parseInt32, "0"},
+-        {NGS(sensor_location), &Config::parseString, ""},
++        {NGS(type), &Config::parseString, XIAOMI_FINGERPRINT_DEFAULT_TYPE},
++        {NGS(sensor_id), &Config::parseInt32, XIAOMI_FINGERPRINT_DEFAULT_SENSOR_ID},
++        {NGS(sensor_location), &Config::parseString, XIAOMI_FINGERPRINT_DEFAULT_SENSOR_LOCATION},
+         {NGS(sensor_strength), &Config::parseInt32, "2"},  // STRONG
+         {NGS(navigation_gesture), &Config::parseBool, "false"},
+         {NGS(detect_interaction), &Config::parseBool, "false"},
+diff --git a/aidl/fingerprint/Session.cpp b/aidl/fingerprint/Session.cpp
+index b935731..8553197 100644
+--- a/aidl/fingerprint/Session.cpp
++++ b/aidl/fingerprint/Session.cpp
+@@ -11,6 +11,12 @@
+ 
+ #include "CancellationSignal.h"
+ 
++// Devices migrating existing templates may need the exact group path of
++// their previous HAL.
++#ifndef XIAOMI_FINGERPRINT_GROUP_PATH
++#define XIAOMI_FINGERPRINT_GROUP_PATH "/data/vendor_de/{}/fpdata/"
++#endif
++
+ namespace aidl::android::hardware::biometrics::fingerprint {
+ 
+ void onClientDeath(void* cookie) {
+@@ -30,7 +36,7 @@ Session::Session(fingerprint_device_t* device, UdfpsHandler* udfpsHandler, int u
+       mUdfpsHandler(udfpsHandler) {
+     mDeathRecipient = AIBinder_DeathRecipient_new(onClientDeath);
+ 
+-    auto path = std::format("/data/vendor_de/{}/fpdata/", userId);
++    auto path = std::format(XIAOMI_FINGERPRINT_GROUP_PATH, userId);
+     mDevice->set_active_group(mDevice, mUserId, path.c_str());
+ }
+ 
+@@ -63,6 +69,7 @@ ndk::ScopedAStatus Session::enroll(const HardwareAuthToken& hat,
+                                    std::shared_ptr<ICancellationSignal>* out) {
+     hw_auth_token_t authToken;
+     translate(hat, authToken);
++    if (mUdfpsHandler) mUdfpsHandler->onOperationStarted();
+ #ifndef IMPL_V2
+     int error = mDevice->enroll(mDevice, &authToken, mUserId, 60);
+ #else
+@@ -70,6 +77,7 @@ ndk::ScopedAStatus Session::enroll(const HardwareAuthToken& hat,
+ #endif
+     if (error) {
+         ALOGE("enroll failed: %d", error);
++        if (mUdfpsHandler) mUdfpsHandler->cancel();
+         mCb->onError(Error::UNABLE_TO_PROCESS, error);
+     }
+ 
+@@ -79,7 +87,9 @@ ndk::ScopedAStatus Session::enroll(const HardwareAuthToken& hat,
+ 
+ ndk::ScopedAStatus Session::authenticate(int64_t operationId,
+                                          std::shared_ptr<ICancellationSignal>* out) {
+-    checkSensorLockout();
++    *out = SharedRefBase::make<CancellationSignal>(this);
++    if (checkSensorLockout()) return ndk::ScopedAStatus::ok();
++    if (mUdfpsHandler) mUdfpsHandler->onOperationStarted();
+ #ifndef IMPL_V2
+     int error = mDevice->authenticate(mDevice, operationId, mUserId);
+ #else
+@@ -87,10 +97,10 @@ ndk::ScopedAStatus Session::authenticate(int64_t operationId,
+ #endif
+     if (error) {
+         ALOGE("authenticate failed: %d", error);
++        if (mUdfpsHandler) mUdfpsHandler->cancel();
+         mCb->onError(Error::UNABLE_TO_PROCESS, error);
+     }
+ 
+-    *out = SharedRefBase::make<CancellationSignal>(this);
+     return ndk::ScopedAStatus::ok();
+ }
+ 
+@@ -220,8 +230,8 @@ ndk::ScopedAStatus Session::onContextChanged(const common::OperationContext& /*c
+     return ndk::ScopedAStatus::ok();
+ }
+ 
+-ndk::ScopedAStatus Session::onPointerCancelWithContext(const PointerContext& /*context*/) {
+-    return ndk::ScopedAStatus::ok();
++ndk::ScopedAStatus Session::onPointerCancelWithContext(const PointerContext& context) {
++    return onPointerUp(context.pointerId);
+ }
+ 
+ ndk::ScopedAStatus Session::setIgnoreDisplayTouches(bool /*shouldIgnore*/) {
+@@ -244,6 +254,7 @@ ndk::ScopedAStatus Session::cancel() {
+ }
+ 
+ ndk::ScopedAStatus Session::close() {
++    if (mUdfpsHandler) mUdfpsHandler->cancel();
+     mClosed = true;
+     mCb->onSessionClosed();
+     AIBinder_DeathRecipient_delete(mDeathRecipient);
+@@ -323,12 +334,14 @@ AcquiredInfo Session::VendorAcquiredFilter(int32_t info, int32_t* vendorCode) {
+ bool Session::checkSensorLockout() {
+     LockoutTracker::LockoutMode lockoutMode = mLockoutTracker.getMode();
+     if (lockoutMode == LockoutTracker::LockoutMode::kPermanent) {
++        if (mUdfpsHandler) mUdfpsHandler->cancel();
+         ALOGE("Fail: lockout permanent");
+         mCb->onLockoutPermanent();
+         mIsLockoutTimerAborted = true;
+         return true;
+     }
+     if (lockoutMode == LockoutTracker::LockoutMode::kTimed) {
++        if (mUdfpsHandler) mUdfpsHandler->cancel();
+         int64_t timeLeft = mLockoutTracker.getLockoutTimeLeft();
+         ALOGE("Fail: lockout timed: %ld", timeLeft);
+         mCb->onLockoutTimed(timeLeft);
+@@ -364,6 +377,7 @@ void Session::notify(const fingerprint_msg_t* msg) {
+     // const uint64_t devId = reinterpret_cast<uint64_t>(mDevice);
+     switch (msg->type) {
+         case FINGERPRINT_ERROR: {
++            if (mUdfpsHandler) mUdfpsHandler->cancel();
+             int32_t vendorCode = 0;
+             Error result = VendorErrorFilter(msg->data.error, &vendorCode);
+             ALOGD("onError(%hhd, %d)", result, vendorCode);
+@@ -392,6 +406,9 @@ void Session::notify(const fingerprint_msg_t* msg) {
+             ALOGD("onEnrollResult(fid=%d, rem=%d)", msg->data.enroll.finger.fid,
+                   msg->data.enroll.samples_remaining);
+ #endif
++            if (msg->data.enroll.samples_remaining == 0 && mUdfpsHandler) {
++                mUdfpsHandler->cancel();
++            }
+             mCb->onEnrollmentProgress(msg->data.enroll.finger.fid,
+                                       msg->data.enroll.samples_remaining);
+ 
+diff --git a/fingerprint/UdfpsHandler.cpp b/fingerprint/UdfpsHandler.cpp
+index 02c3c34..1f7efeb 100644
+--- a/fingerprint/UdfpsHandler.cpp
++++ b/fingerprint/UdfpsHandler.cpp
+@@ -10,7 +10,16 @@
+ #define UDFPS_HANDLER_LIB_NAME "libudfpshandler.so"
+ #define UDFPS_HANDLER_FACTORY "UDFPS_HANDLER_FACTORY"
+ 
++// A binary may link its handler statically, e.g. when it replaces a HAL in
++// a prebuilt vendor image and cannot add libudfpshandler.so.
++extern "C" UdfpsHandlerFactory staticUdfpsHandlerFactory __asm__(UDFPS_HANDLER_FACTORY)
++        __attribute__((weak));
++
+ UdfpsHandlerFactory* getUdfpsHandlerFactory() {
++    if (&staticUdfpsHandlerFactory != nullptr) {
++        return &staticUdfpsHandlerFactory;
++    }
++
+     void* libudfpshander;
+     UdfpsHandlerFactory* factory_handler;
+ 
+diff --git a/fingerprint/include/UdfpsHandler.h b/fingerprint/include/UdfpsHandler.h
+index 78f2368..2efa4c3 100644
+--- a/fingerprint/include/UdfpsHandler.h
++++ b/fingerprint/include/UdfpsHandler.h
+@@ -25,6 +25,9 @@ class UdfpsHandler {
+     virtual void onAuthenticationSucceeded() {};
+     virtual void onAuthenticationFailed() {};
+     virtual void cancel() {};
++
++    // The service and handlers must be rebuilt together when this interface changes.
++    virtual void onOperationStarted() {};
+ };
+ 
+ struct UdfpsHandlerFactory {

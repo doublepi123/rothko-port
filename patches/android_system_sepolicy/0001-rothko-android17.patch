@@ -1,0 +1,34 @@
+From: lcy <admin@luchenyang.xyz>
+Subject: [PATCH] sepolicy: Include device system_ext CIL additions
+
+Keep this patch on the Android 17 baseline recorded in patches/BASES.tsv.
+
+---
+
+diff --git a/Android.bp b/Android.bp
+index c7bdd5435..0bc3b28bf 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -90,6 +90,11 @@ se_build_files {
+     srcs: ["technical_debt.cil"],
+ }
+ 
++se_build_files {
++    name: "sepolicy_compatibility_migrations",
++    srcs: ["compatibility_migrations.cil"],
++}
++
+ phony {
+     // Currently used only for aosp_cf_system_x86_64
+     // TODO(b/329208946): migrate selinux_policy_system to Soong
+@@ -333,6 +338,10 @@ se_policy_conf {
+ se_policy_cil {
+     name: "system_ext_sepolicy.cil",
+     src: ":system_ext_sepolicy.conf",
++    additional_cil_files: [
++        ":sepolicy_technical_debt{.system_ext_private}",
++        ":sepolicy_compatibility_migrations{.system_ext_private}",
++    ],
+     system_ext_specific: true,
+     filter_out: [":plat_sepolicy.cil"],
+ }

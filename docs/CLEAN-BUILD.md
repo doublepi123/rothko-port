@@ -1,5 +1,7 @@
 # 使用本地源码缓存进行干净构建
 
+> 本文记录 Android 16。此分支的构建入口见 [PixelOS 17 移植记录](PIXEL-OS-17.md)。
+
 本流程的目标是从独立源码检出、空输出目录及新生成的开发证书，构建完整设备镜像
 和 `target-files`。2026-11-16 的从空输出构建曾因 WebView 仍是 Git LFS 指针而失败；
 该输入准备问题已修复，原失败检查重跑通过。随后修复了 target-files 的
@@ -13,8 +15,8 @@ VINTF 检查。该记录对应当时的源码快照，发布准入仍独立判�
 先校验本地 LFS 对象缓存或内容匹配的参考工作区文件，再创建目标检出。
 WebView 的 APK 属于这类输入；只有 Git 提交对象而缺少 LFS 实体并不足以构建。
 
-[platform.xml](../tools/manifests/platform.xml) 固定 1,165 个 Lineage/AOSP 项目，
-包含补充的 `hardware/xiaomi`。补丁基线由 [BASES.tsv](../patches/BASES.tsv) 约束。
+[platform.xml](../archive/lineage23.2/manifests/platform.xml) 固定 1,165 个 Lineage/AOSP 项目，
+包含补充的 `hardware/xiaomi`。补丁基线由 [BASES.tsv](../archive/lineage23.2/patches/BASES.tsv) 约束。
 现有工作区可以有项目修改，因为准备工具只读取其 Git 对象，不复制这些修改。
 缓存中的 repo 工具本身需要保持干净。
 

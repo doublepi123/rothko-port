@@ -1,0 +1,167 @@
+From: lcy <admin@luchenyang.xyz>
+Subject: [PATCH] blueprint: Bound memory while generating the Ninja graph
+
+Keep this patch on the Android 17 baseline recorded in patches/BASES.tsv.
+
+---
+
+diff --git a/bootstrap/command.go b/bootstrap/command.go
+index e5f68629..06a6270d 100644
+--- a/bootstrap/command.go
++++ b/bootstrap/command.go
+@@ -172,10 +172,18 @@ func RunBlueprint(args Args, stopBefore StopBefore, ctx *blueprint.Context, conf
+ 		return ninjaDeps, nil
+ 	}
+ 
+-	providersValidationChan := make(chan []error, 1)
+-	go func() {
+-		providersValidationChan <- ctx.VerifyProvidersWereUnchanged()
+-	}()
++	var providersValidationChan chan []error
++	if ctx.SerialSingletons() {
++		if errs := ctx.VerifyProvidersWereUnchanged(); len(errs) != 0 {
++			return nil, proptools.MergeErrors(errs)
++		}
++		runtime.GC()
++	} else {
++		providersValidationChan = make(chan []error, 1)
++		go func() {
++			providersValidationChan <- ctx.VerifyProvidersWereUnchanged()
++		}()
++	}
+ 
+ 	ctx.RecordSandboxMetrics(config)
+ 
+@@ -219,9 +227,10 @@ func RunBlueprint(args Args, stopBefore StopBefore, ctx *blueprint.Context, conf
+ 		}
+ 	}
+ 
+-	providerValidationErrors := <-providersValidationChan
+-	if providerValidationErrors != nil {
+-		return nil, proptools.MergeErrors(providerValidationErrors)
++	if providersValidationChan != nil {
++		if errs := <-providersValidationChan; len(errs) != 0 {
++			return nil, proptools.MergeErrors(errs)
++		}
+ 	}
+ 
+ 	if args.Memprofile != "" {
+diff --git a/context.go b/context.go
+index 790c2d28..24e424a3 100644
+--- a/context.go
++++ b/context.go
+@@ -251,6 +251,7 @@ type Context struct {
+ 
+ 	// If splitAllVariants is true, all variants will be created upfront rather than on-demand.
+ 	splitAllVariants bool
++	serialSingletons bool
+ 
+ 	// index of the first mutator that supports partial analysis.
+ 	mutatorIndexPartialAnalysis int
+@@ -1118,6 +1119,15 @@ func (c *Context) GetSplitAllVariants() bool {
+ 	return c.splitAllVariants
+ }
+ 
++// SetSerialSingletons limits peak memory from simultaneous output generation.
++func (c *Context) SetSerialSingletons(enabled bool) {
++	c.serialSingletons = enabled
++}
++
++func (c *Context) SerialSingletons() bool {
++	return c.serialSingletons
++}
++
+ func (c *Context) SetSplitAllVariants(s bool) {
+ 	c.splitAllVariants = s
+ }
+@@ -4387,7 +4397,18 @@ func (c *Context) generateSingletonBuildActions(config interface{},
+ 	}
+ 
+ 	// First, take care of any singletons that want to run in parallel.
+-	deps, errs = c.generateParallelSingletonBuildActions(config, singletons, liveGlobals)
++	if c.serialSingletons {
++		for _, info := range singletons {
++			if info.parallel {
++				runSingleton(info)
++				if len(errs) > maxErrors {
++					return deps, errs
++				}
++			}
++		}
++	} else {
++		deps, errs = c.generateParallelSingletonBuildActions(config, singletons, liveGlobals)
++	}
+ 
+ 	for _, info := range singletons {
+ 		if !info.parallel {
+@@ -5229,7 +5250,11 @@ func (c *Context) VerifyProvidersWereUnchanged() []error {
+ 		return []error{ErrBuildActionsNotReady}
+ 	}
+ 
+-	errors := parallelVisitSimple(c.iterateAllVariants(), 1000, func(m *moduleInfo, _ int) []error {
++	workers := 1000
++	if c.serialSingletons {
++		workers = 1
++	}
++	errors := parallelVisitSimple(c.iterateAllVariants(), workers, func(m *moduleInfo, _ int) []error {
+ 		var errors []error
+ 		for i, provider := range m.providers {
+ 			if provider != nil {
+@@ -5599,32 +5624,36 @@ func (c *Context) writeAllModuleActions(nw *ninjaWriter, shardNinja bool, ninjaF
+ 		errorCh := make(chan error)
+ 		files := GetNinjaShardFiles(ninjaFileName)
+ 		shardedModules := proptools.ShardByCount(modules, len(files))
++		writeShard := func(name string, batch []*moduleInfo, bufferSize int) (err error) {
++			file, err := pathtools.OpenWithTruncateOnClose(c.fs, JoinPath(c.SrcDir(), name))
++			if err != nil {
++				return fmt.Errorf("error opening Ninja file shard: %w", err)
++			}
++			defer func() { err = errors.Join(err, file.Close()) }()
++			buffer := bufio.NewWriterSize(file, bufferSize)
++			if err := c.writeIncrementalModules(batch, newNinjaWriter(buffer)); err != nil {
++				return err
++			}
++			return buffer.Flush()
++		}
++		if c.serialSingletons && !c.GetIncrementalEnabled() {
++			for i, batch := range shardedModules {
++				name := files[i]
++				if err := writeShard(name, batch, 1024*1024); err != nil {
++					return err
++				}
++				if err := nw.Subninja(name); err != nil {
++					return err
++				}
++			}
++			return nil
++		}
+ 		for i, batchModules := range shardedModules {
+ 			file := files[i]
+ 			wg.Add(1)
+ 			go func(file string, batchModules []*moduleInfo) {
+ 				defer wg.Done()
+-				f, err := pathtools.OpenWithTruncateOnClose(c.fs, JoinPath(c.SrcDir(), file))
+-				if err != nil {
+-					errorCh <- fmt.Errorf("error opening Ninja file shard: %s", err)
+-					return
+-				}
+-				defer func() {
+-					err := f.Close()
+-					if err != nil {
+-						errorCh <- err
+-					}
+-				}()
+-				buf := bufio.NewWriterSize(f, 16*1024*1024)
+-				defer func() {
+-					err := buf.Flush()
+-					if err != nil {
+-						errorCh <- err
+-					}
+-				}()
+-				writer := newNinjaWriter(buf)
+-				err = c.writeIncrementalModules(batchModules, writer)
+-				if err != nil {
++				if err := writeShard(file, batchModules, 16*1024*1024); err != nil {
+ 					errorCh <- err
+ 				}
+ 			}(file, batchModules)

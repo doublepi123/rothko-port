@@ -1,5 +1,7 @@
 # 使用与构建边界
 
+> 本文记录 Android 16。此分支的构建入口见 [PixelOS 17 移植记录](PIXEL-OS-17.md)。
+
 ## 获取与接入
 
 本仓库已经包含设备树和厂商输入脚本。先把它检出到 Android 源码树外：
@@ -23,7 +25,7 @@ bash tools/install-source.sh /absolute/path/to/android
 
 1. 同步 Lineage 23.2 的源码。不能只追踪浮动分支就声称可复现：
    `patches/BASES.tsv` 列出的十二个改动仓库必须位于指定基线。
-   [固定清单](../tools/manifests/platform.xml) 冻结 1,165 个项目，包含补充的
+   [固定清单](../archive/lineage23.2/manifests/platform.xml) 冻结 1,165 个项目，包含补充的
    `hardware/xiaomi`，其余项目沿用既有 Lineage/AOSP 同步基线。
 2. 可用 [本地缓存准备流程](CLEAN-BUILD.md) 建立独立检出，避免重拉源码。
 3. 在每个项目的**干净独立分支**上 checkout 对应基线。

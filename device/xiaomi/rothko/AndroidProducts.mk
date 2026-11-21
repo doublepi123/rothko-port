@@ -4,4 +4,4 @@
 #
 
 PRODUCT_MAKEFILES := \
-    $(LOCAL_DIR)/lineage_rothko.mk
+    $(LOCAL_DIR)/custom_rothko.mk

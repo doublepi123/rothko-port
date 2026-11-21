@@ -1,0 +1,27 @@
+From: lcy <admin@luchenyang.xyz>
+Subject: [PATCH] target-files: Depend on the prebuilt init_boot image
+
+Keep this patch on the Android 17 baseline recorded in patches/BASES.tsv.
+
+---
+
+diff --git a/core/Makefile b/core/Makefile
+index 36824619c6..a498d00bcc 100644
+--- a/core/Makefile
++++ b/core/Makefile
+@@ -6716,6 +6716,7 @@ endif
+ # directories are up-to-date.
+ $(BUILT_TARGET_FILES_DIR): \
+ 	    $(INSTALLED_RADIOIMAGE_TARGET) \
++	    $(INSTALLED_INIT_BOOT_IMAGE_TARGET) \
+ 	    $(INSTALLED_RECOVERYIMAGE_TARGET) \
+ 	    $(INSTALLED_CACHEIMAGE_TARGET) \
+ 	    $(INSTALLED_DTBOIMAGE_TARGET) \
+@@ -7264,6 +7265,7 @@ target-files-dir: $(BUILT_TARGET_FILES_DIR)
+ 
+ $(call declare-1p-container,$(BUILT_TARGET_FILES_PACKAGE),)
+ $(call declare-container-license-deps,$(BUILT_TARGET_FILES_PACKAGE), $(INSTALLED_RADIOIMAGE_TARGET) \
++	    $(INSTALLED_INIT_BOOT_IMAGE_TARGET) \
+             $(INSTALLED_RECOVERYIMAGE_TARGET) \
+             $(INSTALLED_CACHEIMAGE_TARGET) \
+             $(INSTALLED_DTBOIMAGE_TARGET) \
