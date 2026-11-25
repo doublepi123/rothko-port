@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# Stock init launches this legacy Binder daemon from system_ext.
+type vtservice, domain, coredomain;
+type vtservice_exec, exec_type, file_type, system_file_type;
+init_daemon_domain(vtservice)
+
+type vtservice_service, service_manager_type;
+binder_use(vtservice)
+binder_service(vtservice)
+
+allow radio vtservice_service:service_manager find;
+allow vtservice vtservice_service:service_manager add;
+allow vtservice mediaserver:binder { call transfer };
+allow mediaserver vtservice:binder transfer;
+allow vtservice mediaserver:fd use;
